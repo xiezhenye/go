@@ -233,6 +233,7 @@ type DB struct {
 	lastPut  map[*driverConn]string // stacktrace of last conn's put; debug only
 	maxIdle  int                    // zero means defaultMaxIdleConns; negative means 0
 	maxOpen  int                    // <= 0 means unlimited
+	maxBadConnRetries  int          // negative means 0
 }
 
 // connReuseStrategy determines how (*DB).conn returns database connections.
@@ -466,6 +467,7 @@ func Open(driverName, dataSourceName string) (*DB, error) {
 		dsn:      dataSourceName,
 		openerCh: make(chan struct{}, connectionRequestQueueSize),
 		lastPut:  make(map[*driverConn]string),
+		maxBadConnRetries: maxBadConnRetries,
 	}
 	go db.connectionOpener()
 	return db, nil
@@ -582,6 +584,16 @@ func (db *DB) SetMaxOpenConns(n int) {
 	if syncMaxIdle {
 		db.SetMaxIdleConns(n)
 	}
+}
+
+func (db *DB) SetMaxBadConnRetries(n int) {
+	db.mu.Lock()
+	if n < 0 {
+		db.maxBadConnRetries = 0
+	} else {
+		db.maxBadConnRetries = n
+	}
+	db.mu.Unlock()
 }
 
 // DBStats contains database statistics.
@@ -832,16 +844,16 @@ const maxBadConnRetries = 2
 func (db *DB) Prepare(query string) (*Stmt, error) {
 	var stmt *Stmt
 	var err error
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < db.maxBadConnRetries; i++ {
 		stmt, err = db.prepare(query, cachedOrNewConn)
+		if err == nil {
+			return stmt, nil
+		}
 		if err != driver.ErrBadConn {
 			break
 		}
 	}
-	if err == driver.ErrBadConn {
-		return db.prepare(query, alwaysNewConn)
-	}
-	return stmt, err
+	return db.prepare(query, alwaysNewConn)
 }
 
 func (db *DB) prepare(query string, strategy connReuseStrategy) (*Stmt, error) {
@@ -878,16 +890,16 @@ func (db *DB) prepare(query string, strategy connReuseStrategy) (*Stmt, error) {
 func (db *DB) Exec(query string, args ...interface{}) (Result, error) {
 	var res Result
 	var err error
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < db.maxBadConnRetries; i++ {
 		res, err = db.exec(query, args, cachedOrNewConn)
+		if err == nil {
+			return res, nil
+		}
 		if err != driver.ErrBadConn {
 			break
 		}
 	}
-	if err == driver.ErrBadConn {
-		return db.exec(query, args, alwaysNewConn)
-	}
-	return res, err
+	return db.exec(query, args, alwaysNewConn)
 }
 
 func (db *DB) exec(query string, args []interface{}, strategy connReuseStrategy) (res Result, err error) {
@@ -930,16 +942,16 @@ func (db *DB) exec(query string, args []interface{}, strategy connReuseStrategy)
 func (db *DB) Query(query string, args ...interface{}) (*Rows, error) {
 	var rows *Rows
 	var err error
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < db.maxBadConnRetries; i++ {
 		rows, err = db.query(query, args, cachedOrNewConn)
+		if err == nil {
+			return rows, nil
+		}
 		if err != driver.ErrBadConn {
 			break
 		}
 	}
-	if err == driver.ErrBadConn {
-		return db.query(query, args, alwaysNewConn)
-	}
-	return rows, err
+	return db.query(query, args, alwaysNewConn)
 }
 
 func (db *DB) query(query string, args []interface{}, strategy connReuseStrategy) (*Rows, error) {
@@ -1021,16 +1033,16 @@ func (db *DB) QueryRow(query string, args ...interface{}) *Row {
 func (db *DB) Begin() (*Tx, error) {
 	var tx *Tx
 	var err error
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < db.maxBadConnRetries; i++ {
 		tx, err = db.begin(cachedOrNewConn)
+		if err == nil {
+			return tx, nil
+		}
 		if err != driver.ErrBadConn {
 			break
 		}
 	}
-	if err == driver.ErrBadConn {
-		return db.begin(alwaysNewConn)
-	}
-	return tx, err
+	return db.begin(alwaysNewConn)
 }
 
 func (db *DB) begin(strategy connReuseStrategy) (tx *Tx, err error) {
@@ -1323,7 +1335,7 @@ func (s *Stmt) Exec(args ...interface{}) (Result, error) {
 	defer s.closemu.RUnlock()
 
 	var res Result
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < s.db.maxBadConnRetries + 1; i++ {
 		dc, releaseConn, si, err := s.connStmt()
 		if err != nil {
 			if err == driver.ErrBadConn {
@@ -1460,7 +1472,7 @@ func (s *Stmt) Query(args ...interface{}) (*Rows, error) {
 	defer s.closemu.RUnlock()
 
 	var rowsi driver.Rows
-	for i := 0; i < maxBadConnRetries; i++ {
+	for i := 0; i < s.db.maxBadConnRetries + 1; i++ {
 		dc, releaseConn, si, err := s.connStmt()
 		if err != nil {
 			if err == driver.ErrBadConn {
