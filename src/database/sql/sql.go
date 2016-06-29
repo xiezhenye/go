@@ -467,7 +467,7 @@ func Open(driverName, dataSourceName string) (*DB, error) {
 		dsn:      dataSourceName,
 		openerCh: make(chan struct{}, connectionRequestQueueSize),
 		lastPut:  make(map[*driverConn]string),
-		maxBadConnRetries: maxBadConnRetries,
+		maxBadConnRetries: defaultMaxBadConnRetries,
 	}
 	go db.connectionOpener()
 	return db, nil
@@ -586,6 +586,9 @@ func (db *DB) SetMaxOpenConns(n int) {
 	}
 }
 
+// Set the number of maximum retries if the driver returns
+// driver.ErrBadConn to signal a broken connection before forcing a new
+// connection to be opened.
 func (db *DB) SetMaxBadConnRetries(n int) {
 	db.mu.Lock()
 	if n < 0 {
@@ -833,10 +836,8 @@ func (db *DB) putConnDBLocked(dc *driverConn, err error) bool {
 	return false
 }
 
-// maxBadConnRetries is the number of maximum retries if the driver returns
-// driver.ErrBadConn to signal a broken connection before forcing a new
-// connection to be opened.
-const maxBadConnRetries = 2
+// Default value of DB.maxBadConnRetries
+const defaultMaxBadConnRetries = 2
 
 // Prepare creates a prepared statement for later queries or executions.
 // Multiple queries or executions may be run concurrently from the
@@ -846,11 +847,8 @@ func (db *DB) Prepare(query string) (*Stmt, error) {
 	var err error
 	for i := 0; i < db.maxBadConnRetries; i++ {
 		stmt, err = db.prepare(query, cachedOrNewConn)
-		if err == nil {
-			return stmt, nil
-		}
 		if err != driver.ErrBadConn {
-			break
+			return stmt, err
 		}
 	}
 	return db.prepare(query, alwaysNewConn)
@@ -892,11 +890,8 @@ func (db *DB) Exec(query string, args ...interface{}) (Result, error) {
 	var err error
 	for i := 0; i < db.maxBadConnRetries; i++ {
 		res, err = db.exec(query, args, cachedOrNewConn)
-		if err == nil {
-			return res, nil
-		}
 		if err != driver.ErrBadConn {
-			break
+			return res, err
 		}
 	}
 	return db.exec(query, args, alwaysNewConn)
@@ -944,11 +939,8 @@ func (db *DB) Query(query string, args ...interface{}) (*Rows, error) {
 	var err error
 	for i := 0; i < db.maxBadConnRetries; i++ {
 		rows, err = db.query(query, args, cachedOrNewConn)
-		if err == nil {
-			return rows, nil
-		}
 		if err != driver.ErrBadConn {
-			break
+			return rows, err
 		}
 	}
 	return db.query(query, args, alwaysNewConn)
@@ -1035,11 +1027,8 @@ func (db *DB) Begin() (*Tx, error) {
 	var err error
 	for i := 0; i < db.maxBadConnRetries; i++ {
 		tx, err = db.begin(cachedOrNewConn)
-		if err == nil {
-			return tx, nil
-		}
 		if err != driver.ErrBadConn {
-			break
+			return tx, err
 		}
 	}
 	return db.begin(alwaysNewConn)
