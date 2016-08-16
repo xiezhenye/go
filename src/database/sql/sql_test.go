@@ -1601,7 +1601,7 @@ func TestManyErrBadConn(t *testing.T) {
 	manyErrBadConnSetup := func() *DB {
 		db := newTestDB(t, "people")
 
-		nconn := maxBadConnRetries + 1
+		nconn := defaultMaxBadConnRetries + 1
 		db.SetMaxIdleConns(nconn)
 		db.SetMaxOpenConns(nconn)
 		// open enough connections
