@@ -11,12 +11,10 @@ import (
 )
 
 func defframe(ptxt *obj.Prog) {
-	var n *gc.Node
-
 	// fill in argument size, stack size
 	ptxt.To.Type = obj.TYPE_TEXTSIZE
 
-	ptxt.To.Val = int32(gc.Rnd(gc.Curfn.Type.Argwid, int64(gc.Widthptr)))
+	ptxt.To.Val = int32(gc.Rnd(gc.Curfn.Type.ArgWidth(), int64(gc.Widthptr)))
 	frame := uint32(gc.Rnd(gc.Stksize+gc.Maxarg, int64(gc.Widthreg)))
 	ptxt.To.Offset = int64(frame)
 
@@ -28,16 +26,15 @@ func defframe(ptxt *obj.Prog) {
 	hi := int64(0)
 	lo := hi
 	ax := uint32(0)
-	for l := gc.Curfn.Func.Dcl; l != nil; l = l.Next {
-		n = l.N
+	for _, n := range gc.Curfn.Func.Dcl {
 		if !n.Name.Needzero {
 			continue
 		}
 		if n.Class != gc.PAUTO {
-			gc.Fatal("needzero class %d", n.Class)
+			gc.Fatalf("needzero class %d", n.Class)
 		}
 		if n.Type.Width%int64(gc.Widthptr) != 0 || n.Xoffset%int64(gc.Widthptr) != 0 || n.Type.Width == 0 {
-			gc.Fatal("var %v has size %d offset %d", gc.Nconv(n, obj.FmtLong), int(n.Type.Width), int(n.Xoffset))
+			gc.Fatalf("var %v has size %d offset %d", gc.Nconv(n, gc.FmtLong), int(n.Type.Width), int(n.Xoffset))
 		}
 		if lo != hi && n.Xoffset+n.Type.Width == lo-int64(2*gc.Widthptr) {
 			// merge with range we already have
@@ -87,15 +84,15 @@ func zerorange(p *obj.Prog, frame int64, lo int64, hi int64, ax *uint32) *obj.Pr
 	return p
 }
 
-func appendpp(p *obj.Prog, as int, ftype int, freg int, foffset int64, ttype int, treg int, toffset int64) *obj.Prog {
+func appendpp(p *obj.Prog, as obj.As, ftype obj.AddrType, freg int, foffset int64, ttype obj.AddrType, treg int, toffset int64) *obj.Prog {
 	q := gc.Ctxt.NewProg()
 	gc.Clearp(q)
-	q.As = int16(as)
+	q.As = as
 	q.Lineno = p.Lineno
-	q.From.Type = int16(ftype)
+	q.From.Type = ftype
 	q.From.Reg = int16(freg)
 	q.From.Offset = foffset
-	q.To.Type = int16(ttype)
+	q.To.Type = ttype
 	q.To.Reg = int16(treg)
 	q.To.Offset = toffset
 	q.Link = p.Link
@@ -133,24 +130,14 @@ func clearfat(nl *gc.Node) {
 		n1.Op = gc.OINDREG
 		var z gc.Node
 		gc.Nodconst(&z, gc.Types[gc.TUINT64], 0)
-		for {
-			tmp14 := q
-			q--
-			if tmp14 <= 0 {
-				break
-			}
+		for ; q > 0; q-- {
 			n1.Type = z.Type
 			gins(x86.AMOVL, &z, &n1)
 			n1.Xoffset += 4
 		}
 
 		gc.Nodconst(&z, gc.Types[gc.TUINT8], 0)
-		for {
-			tmp15 := c
-			c--
-			if tmp15 <= 0 {
-				break
-			}
+		for ; c > 0; c-- {
 			n1.Type = z.Type
 			gins(x86.AMOVB, &z, &n1)
 			n1.Xoffset++
@@ -201,7 +188,7 @@ var panicdiv *gc.Node
  *	res = nl % nr
  * according to op.
  */
-func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.Node) {
+func dodiv(op gc.Op, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.Node) {
 	// Have to be careful about handling
 	// most negative int divided by -1 correctly.
 	// The hardware will trap.
@@ -213,23 +200,23 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.N
 	t := nl.Type
 
 	t0 := t
-	check := 0
-	if gc.Issigned[t.Etype] {
-		check = 1
-		if gc.Isconst(nl, gc.CTINT) && nl.Int() != -1<<uint64(t.Width*8-1) {
-			check = 0
-		} else if gc.Isconst(nr, gc.CTINT) && nr.Int() != -1 {
-			check = 0
+	check := false
+	if t.IsSigned() {
+		check = true
+		if gc.Isconst(nl, gc.CTINT) && nl.Int64() != -1<<uint64(t.Width*8-1) {
+			check = false
+		} else if gc.Isconst(nr, gc.CTINT) && nr.Int64() != -1 {
+			check = false
 		}
 	}
 
 	if t.Width < 4 {
-		if gc.Issigned[t.Etype] {
+		if t.IsSigned() {
 			t = gc.Types[gc.TINT32]
 		} else {
 			t = gc.Types[gc.TUINT32]
 		}
-		check = 0
+		check = false
 	}
 
 	var t1 gc.Node
@@ -278,7 +265,7 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.N
 		gc.Patch(p1, gc.Pc)
 	}
 
-	if check != 0 {
+	if check {
 		gc.Nodconst(&n4, t, -1)
 		gins(optoas(gc.OCMP, t), &n1, &n4)
 		p1 := gc.Gbranch(optoas(gc.ONE, t), nil, +1)
@@ -298,7 +285,7 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.N
 		gc.Patch(p1, gc.Pc)
 	}
 
-	if !gc.Issigned[t.Etype] {
+	if !t.IsSigned() {
 		var nz gc.Node
 		gc.Nodconst(&nz, t, 0)
 		gmove(&nz, dx)
@@ -313,13 +300,13 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node, ax *gc.Node, dx *gc.N
 	} else {
 		gmove(dx, res)
 	}
-	if check != 0 {
+	if check {
 		gc.Patch(p2, gc.Pc)
 	}
 }
 
 func savex(dr int, x *gc.Node, oldx *gc.Node, res *gc.Node, t *gc.Type) {
-	r := int(reg[dr])
+	r := gc.GetReg(dr)
 	gc.Nodreg(x, gc.Types[gc.TINT32], dr)
 
 	// save current ax and dx if they are live
@@ -348,13 +335,13 @@ func restx(x *gc.Node, oldx *gc.Node) {
  *	res = nl / nr
  *	res = nl % nr
  */
-func cgen_div(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
+func cgen_div(op gc.Op, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	if gc.Is64(nl.Type) {
-		gc.Fatal("cgen_div %v", nl.Type)
+		gc.Fatalf("cgen_div %v", nl.Type)
 	}
 
 	var t *gc.Type
-	if gc.Issigned[nl.Type.Etype] {
+	if nl.Type.IsSigned() {
 		t = gc.Types[gc.TINT32]
 	} else {
 		t = gc.Types[gc.TUINT32]
@@ -375,9 +362,9 @@ func cgen_div(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
  *	res = nl << nr
  *	res = nl >> nr
  */
-func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
+func cgen_shift(op gc.Op, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	if nl.Type.Width > 4 {
-		gc.Fatal("cgen_shift %v", nl.Type)
+		gc.Fatalf("cgen_shift %v", nl.Type)
 	}
 
 	w := int(nl.Type.Width * 8)
@@ -391,7 +378,7 @@ func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 		var n1 gc.Node
 		gc.Regalloc(&n1, nl.Type, res)
 		gmove(&n2, &n1)
-		sc := uint64(nr.Int())
+		sc := uint64(nr.Int64())
 		if sc >= uint64(nl.Type.Width*8) {
 			// large shift gets 2 shifts by width-1
 			gins(a, ncon(uint32(w)-1), &n1)
@@ -408,7 +395,7 @@ func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	var oldcx gc.Node
 	var cx gc.Node
 	gc.Nodreg(&cx, gc.Types[gc.TUINT32], x86.REG_CX)
-	if reg[x86.REG_CX] > 1 && !gc.Samereg(&cx, res) {
+	if gc.GetReg(x86.REG_CX) > 1 && !gc.Samereg(&cx, res) {
 		gc.Tempname(&oldcx, gc.Types[gc.TUINT32])
 		gmove(&cx, &oldcx)
 	}
@@ -472,7 +459,7 @@ func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 			p1 = gc.Gbranch(optoas(gc.OLT, gc.Types[gc.TUINT32]), nil, +1)
 		}
 
-		if op == gc.ORSH && gc.Issigned[nl.Type.Etype] {
+		if op == gc.ORSH && nl.Type.IsSigned() {
 			gins(a, ncon(uint32(w)-1), &n2)
 		} else {
 			gmove(ncon(0), &n2)
@@ -499,7 +486,7 @@ func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
  * there is no 2-operand byte multiply instruction so
  * we do a full-width multiplication and truncate afterwards.
  */
-func cgen_bmul(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) bool {
+func cgen_bmul(op gc.Op, nl *gc.Node, nr *gc.Node, res *gc.Node) bool {
 	if optoas(op, nl.Type) != x86.AIMULB {
 		return false
 	}
@@ -507,15 +494,13 @@ func cgen_bmul(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) bool {
 	// copy from byte to full registers
 	t := gc.Types[gc.TUINT32]
 
-	if gc.Issigned[nl.Type.Etype] {
+	if nl.Type.IsSigned() {
 		t = gc.Types[gc.TINT32]
 	}
 
 	// largest ullman on left.
 	if nl.Ullman < nr.Ullman {
-		tmp := nl
-		nl = nr
-		nr = tmp
+		nl, nr = nr, nl
 	}
 
 	var nt gc.Node
@@ -543,24 +528,21 @@ func cgen_bmul(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) bool {
 func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	var n1 gc.Node
 	var n2 gc.Node
-	var ax gc.Node
-	var dx gc.Node
 
 	t := nl.Type
 	a := optoas(gc.OHMUL, t)
 
 	// gen nl in n1.
 	gc.Tempname(&n1, t)
-
 	gc.Cgen(nl, &n1)
 
 	// gen nr in n2.
 	gc.Regalloc(&n2, t, res)
-
 	gc.Cgen(nr, &n2)
 
-	// multiply.
-	gc.Nodreg(&ax, t, x86.REG_AX)
+	var ax, oldax, dx, olddx gc.Node
+	savex(x86.REG_AX, &ax, &oldax, res, gc.Types[gc.TUINT32])
+	savex(x86.REG_DX, &dx, &olddx, res, gc.Types[gc.TUINT32])
 
 	gmove(&n2, &ax)
 	gins(a, &n1, nil)
@@ -568,14 +550,16 @@ func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 
 	if t.Width == 1 {
 		// byte multiply behaves differently.
-		gc.Nodreg(&ax, t, x86.REG_AH)
-
-		gc.Nodreg(&dx, t, x86.REG_DX)
-		gmove(&ax, &dx)
+		var byteAH, byteDX gc.Node
+		gc.Nodreg(&byteAH, t, x86.REG_AH)
+		gc.Nodreg(&byteDX, t, x86.REG_DX)
+		gmove(&byteAH, &byteDX)
 	}
 
-	gc.Nodreg(&dx, t, x86.REG_DX)
 	gmove(&dx, res)
+
+	restx(&ax, &oldax)
+	restx(&dx, &olddx)
 }
 
 /*
@@ -640,18 +624,18 @@ func cgen_float387(n *gc.Node, res *gc.Node) {
 		if nl.Ullman >= nr.Ullman {
 			gc.Cgen(nl, &f0)
 			if nr.Addable {
-				gins(foptoas(int(n.Op), n.Type, 0), nr, &f0)
+				gins(foptoas(n.Op, n.Type, 0), nr, &f0)
 			} else {
 				gc.Cgen(nr, &f0)
-				gins(foptoas(int(n.Op), n.Type, Fpop), &f0, &f1)
+				gins(foptoas(n.Op, n.Type, Fpop), &f0, &f1)
 			}
 		} else {
 			gc.Cgen(nr, &f0)
 			if nl.Addable {
-				gins(foptoas(int(n.Op), n.Type, Frev), nl, &f0)
+				gins(foptoas(n.Op, n.Type, Frev), nl, &f0)
 			} else {
 				gc.Cgen(nl, &f0)
-				gins(foptoas(int(n.Op), n.Type, Frev|Fpop), &f0, &f1)
+				gins(foptoas(n.Op, n.Type, Frev|Fpop), &f0, &f1)
 			}
 		}
 
@@ -663,34 +647,33 @@ func cgen_float387(n *gc.Node, res *gc.Node) {
 	gc.Cgen(nl, &f0)
 
 	if n.Op != gc.OCONV && n.Op != gc.OPLUS {
-		gins(foptoas(int(n.Op), n.Type, 0), nil, nil)
+		gins(foptoas(n.Op, n.Type, 0), nil, nil)
 	}
 	gmove(&f0, res)
 	return
 }
 
 func cgen_floatsse(n *gc.Node, res *gc.Node) {
-	var a int
+	var a obj.As
 
 	nl := n.Left
 	nr := n.Right
 	switch n.Op {
 	default:
 		gc.Dump("cgen_floatsse", n)
-		gc.Fatal("cgen_floatsse %v", gc.Oconv(int(n.Op), 0))
+		gc.Fatalf("cgen_floatsse %v", n.Op)
 		return
 
 	case gc.OMINUS,
 		gc.OCOM:
-		nr = gc.Nodintconst(-1)
-		gc.Convlit(&nr, n.Type)
+		nr = gc.NegOne(n.Type)
 		a = foptoas(gc.OMUL, nl.Type, 0)
 		goto sbop
 
 		// symmetric binary
 	case gc.OADD,
 		gc.OMUL:
-		a = foptoas(int(n.Op), nl.Type, 0)
+		a = foptoas(n.Op, nl.Type, 0)
 
 		goto sbop
 
@@ -698,16 +681,14 @@ func cgen_floatsse(n *gc.Node, res *gc.Node) {
 	case gc.OSUB,
 		gc.OMOD,
 		gc.ODIV:
-		a = foptoas(int(n.Op), nl.Type, 0)
+		a = foptoas(n.Op, nl.Type, 0)
 
 		goto abop
 	}
 
 sbop: // symmetric binary
 	if nl.Ullman < nr.Ullman || nl.Op == gc.OLITERAL {
-		r := nl
-		nl = nr
-		nr = r
+		nl, nr = nr, nl
 	}
 
 abop: // asymmetric binary
@@ -743,7 +724,7 @@ abop: // asymmetric binary
 func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 	nl := n.Left
 	nr := n.Right
-	a := int(n.Op)
+	op := n.Op
 	if !wantTrue {
 		// brcom is not valid on floats when NaN is involved.
 		p1 := gc.Gbranch(obj.AJMP, nil, 0)
@@ -759,11 +740,11 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 	}
 
 	if gc.Thearch.Use387 {
-		a = gc.Brrev(a) // because the args are stacked
-		if a == gc.OGE || a == gc.OGT {
+		op = gc.Brrev(op) // because the args are stacked
+		if op == gc.OGE || op == gc.OGT {
 			// only < and <= work right with NaN; reverse if needed
 			nl, nr = nr, nl
-			a = gc.Brrev(a)
+			op = gc.Brrev(op)
 		}
 
 		var ax, n2, tmp gc.Node
@@ -779,9 +760,7 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 				gc.Cgen(nr, &tmp)
 				gc.Cgen(nl, &tmp)
 			}
-
-			gins(x86.AFUCOMIP, &tmp, &n2)
-			gins(x86.AFMOVDP, &tmp, &tmp) // annoying pop but still better than STSW+SAHF
+			gins(x86.AFUCOMPP, &tmp, &n2)
 		} else {
 			// TODO(rsc): The moves back and forth to memory
 			// here are for truncating the value to 32 bits.
@@ -798,9 +777,9 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 			gc.Cgen(nl, &t2)
 			gmove(&t2, &tmp)
 			gins(x86.AFCOMFP, &t1, &tmp)
-			gins(x86.AFSTSW, nil, &ax)
-			gins(x86.ASAHF, nil, nil)
 		}
+		gins(x86.AFSTSW, nil, &ax)
+		gins(x86.ASAHF, nil, nil)
 	} else {
 		// Not 387
 		if !nl.Addable {
@@ -822,10 +801,10 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 			nl = &n3
 		}
 
-		if a == gc.OGE || a == gc.OGT {
-			// only < and <= work right with NaN; reverse if needed
+		if op == gc.OGE || op == gc.OGT {
+			// only < and <= work right with NopN; reverse if needed
 			nl, nr = nr, nl
-			a = gc.Brrev(a)
+			op = gc.Brrev(op)
 		}
 
 		gins(foptoas(gc.OCMP, nr.Type, 0), nl, nr)
@@ -835,7 +814,7 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 		gc.Regfree(nr)
 	}
 
-	switch a {
+	switch op {
 	case gc.OEQ:
 		// neither NE nor P
 		p1 := gc.Gbranch(x86.AJNE, nil, -likely)
@@ -848,7 +827,7 @@ func bgen_float(n *gc.Node, wantTrue bool, likely int, to *obj.Prog) {
 		gc.Patch(gc.Gbranch(x86.AJNE, nil, likely), to)
 		gc.Patch(gc.Gbranch(x86.AJPS, nil, likely), to)
 	default:
-		gc.Patch(gc.Gbranch(optoas(a, nr.Type), nil, likely), to)
+		gc.Patch(gc.Gbranch(optoas(op, nr.Type), nil, likely), to)
 	}
 }
 
@@ -863,7 +842,7 @@ func expandchecks(firstp *obj.Prog) {
 			continue
 		}
 		if gc.Debug_checknil != 0 && p.Lineno > 1 { // p->lineno==1 in generated wrappers
-			gc.Warnl(int(p.Lineno), "generated nil check")
+			gc.Warnl(p.Lineno, "generated nil check")
 		}
 
 		// check is

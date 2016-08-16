@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"fmt"
 	"go/build"
+	"internal/testenv"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,17 +20,17 @@ const testdata = `
 MOVQ AX, AX -> MOVQ AX, AX
 
 LEAQ name(SB), AX -> MOVQ name@GOT(SB), AX
-LEAQ name+10(SB), AX -> MOVQ name@GOT(SB), AX; ADDQ $10, AX
+LEAQ name+10(SB), AX -> MOVQ name@GOT(SB), AX; LEAQ 10(AX), AX
 MOVQ $name(SB), AX -> MOVQ name@GOT(SB), AX
-MOVQ $name+10(SB), AX -> MOVQ name@GOT(SB), AX; ADDQ $10, AX
+MOVQ $name+10(SB), AX -> MOVQ name@GOT(SB), AX; LEAQ 10(AX), AX
 
-MOVQ name(SB), AX -> MOVQ name@GOT(SB), R15; MOVQ (R15), AX
-MOVQ name+10(SB), AX -> MOVQ name@GOT(SB), R15; MOVQ 10(R15), AX
+MOVQ name(SB), AX -> NOP; MOVQ name@GOT(SB), R15; MOVQ (R15), AX
+MOVQ name+10(SB), AX -> NOP; MOVQ name@GOT(SB), R15; MOVQ 10(R15), AX
 
-CMPQ name(SB), $0 -> MOVQ name@GOT(SB), R15; CMPQ (R15), $0
+CMPQ name(SB), $0 -> NOP; MOVQ name@GOT(SB), R15; CMPQ (R15), $0
 
-MOVQ $1, name(SB) -> MOVQ name@GOT(SB), R15; MOVQ $1, (R15)
-MOVQ $1, name+10(SB) -> MOVQ name@GOT(SB), R15; MOVQ $1, 10(R15)
+MOVQ $1, name(SB) -> NOP; MOVQ name@GOT(SB), R15; MOVQ $1, (R15)
+MOVQ $1, name+10(SB) -> NOP; MOVQ name@GOT(SB), R15; MOVQ $1, 10(R15)
 `
 
 type ParsedTestData struct {
@@ -76,7 +76,6 @@ func parseTestData(t *testing.T) *ParsedTestData {
 }
 
 var spaces_re *regexp.Regexp = regexp.MustCompile("\\s+")
-var marker_re *regexp.Regexp = regexp.MustCompile("MOVQ \\$([0-9]+), AX")
 
 func normalize(s string) string {
 	return spaces_re.ReplaceAllLiteralString(strings.TrimSpace(s), " ")
@@ -148,10 +147,15 @@ func parseOutput(t *testing.T, td *ParsedTestData, asmout []byte) {
 }
 
 func TestDynlink(t *testing.T) {
-	iOS := runtime.GOOS == "darwin" && (runtime.GOARCH == "arm" || runtime.GOARCH == "arm64")
-	if runtime.GOOS == "nacl" || runtime.GOOS == "android" || iOS {
-		t.Skipf("skipping on %s/%s, cannot fork", runtime.GOOS, runtime.GOARCH)
+	testenv.MustHaveGoBuild(t)
+
+	if os.Getenv("GOHOSTARCH") != "" {
+		// TODO: make this work? It was failing due to the
+		// GOARCH= filtering above and skipping is easiest for
+		// now.
+		t.Skip("skipping when GOHOSTARCH is set")
 	}
+
 	testdata := parseTestData(t)
 	asmout := asmOutput(t, testdata.input)
 	parseOutput(t, testdata, asmout)

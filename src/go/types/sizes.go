@@ -64,6 +64,15 @@ func (s *StdSizes) Alignof(T Type) int64 {
 			}
 		}
 		return max
+	case *Slice, *Interface:
+		// Multiword data structures are effectively structs
+		// in which each element has size WordSize.
+		return s.WordSize
+	case *Basic:
+		// Strings are like slices and interfaces.
+		if t.Info()&IsString != 0 {
+			return s.WordSize
+		}
 	}
 	a := s.Sizeof(T) // may be 0
 	// spec: "For a variable x of any type: unsafe.Alignof(x) is at least 1."
@@ -132,12 +141,7 @@ func (s *StdSizes) Sizeof(T Type) int64 {
 		if n == 0 {
 			return 0
 		}
-		offsets := t.offsets
-		if t.offsets == nil {
-			// compute offsets on demand
-			offsets = s.Offsetsof(t.fields)
-			t.offsets = offsets
-		}
+		offsets := s.Offsetsof(t.fields)
 		return offsets[n-1] + s.Sizeof(t.fields[n-1].typ)
 	case *Interface:
 		return s.WordSize * 2
@@ -159,11 +163,11 @@ func (conf *Config) alignof(T Type) int64 {
 }
 
 func (conf *Config) offsetsof(T *Struct) []int64 {
-	offsets := T.offsets
-	if offsets == nil && T.NumFields() > 0 {
+	var offsets []int64
+	if T.NumFields() > 0 {
 		// compute offsets on demand
 		if s := conf.Sizes; s != nil {
-			offsets = s.Offsetsof(T.fields)
+			offsets := s.Offsetsof(T.fields)
 			// sanity checks
 			if len(offsets) != T.NumFields() {
 				panic("Config.Sizes.Offsetsof returned the wrong number of offsets")
@@ -176,7 +180,6 @@ func (conf *Config) offsetsof(T *Struct) []int64 {
 		} else {
 			offsets = stdSizes.Offsetsof(T.fields)
 		}
-		T.offsets = offsets
 	}
 	return offsets
 }

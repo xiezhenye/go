@@ -178,13 +178,15 @@ const header = `
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// +build cgo
 // +build darwin
 // +build arm arm64
 
 package x509
 
-func initSystemRoots() {
-	systemRoots = NewCertPool()
-	systemRoots.AppendCertsFromPEM([]byte(systemRootsPEM))
+func loadSystemRoots() (*CertPool, error) {
+	p := NewCertPool()
+	p.AppendCertsFromPEM([]byte(systemRootsPEM))
+	return p, nil
 }
 `

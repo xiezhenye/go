@@ -6,29 +6,29 @@
 
 package types
 
-import exact "go/constant" // Renamed to reduce diffs from x/tools.  TODO: remove
+import "go/constant"
 
 // Conversion type-checks the conversion T(x).
 // The result is in x.
 func (check *Checker) conversion(x *operand, T Type) {
-	constArg := x.mode == constant
+	constArg := x.mode == constant_
 
 	var ok bool
 	switch {
 	case constArg && isConstType(T):
 		// constant conversion
 		switch t := T.Underlying().(*Basic); {
-		case representableConst(x.val, check.conf, t.kind, &x.val):
+		case representableConst(x.val, check.conf, t, &x.val):
 			ok = true
-		case x.isInteger() && isString(t):
+		case isInteger(x.typ) && isString(t):
 			codepoint := int64(-1)
-			if i, ok := exact.Int64Val(x.val); ok {
+			if i, ok := constant.Int64Val(x.val); ok {
 				codepoint = i
 			}
 			// If codepoint < 0 the absolute value is too large (or unknown) for
 			// conversion. This is the same as converting any other out-of-range
 			// value - let string(codepoint) do the work.
-			x.val = exact.MakeString(string(codepoint))
+			x.val = constant.MakeString(string(codepoint))
 			ok = true
 		}
 	case x.convertibleTo(check.conf, T):
@@ -65,7 +65,7 @@ func (check *Checker) conversion(x *operand, T Type) {
 
 func (x *operand) convertibleTo(conf *Config, T Type) bool {
 	// "x is assignable to T"
-	if x.assignableTo(conf, T) {
+	if x.assignableTo(conf, T, nil) {
 		return true
 	}
 

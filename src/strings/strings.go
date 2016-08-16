@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package strings implements simple functions to manipulate strings.
+// Package strings implements simple functions to manipulate UTF-8 encoded strings.
+//
+// For information about UTF-8 strings in Go, see https://blog.golang.org/strings.
 package strings
 
 import (
@@ -10,32 +12,25 @@ import (
 	"unicode/utf8"
 )
 
-// explode splits s into an array of UTF-8 sequences, one per Unicode character (still strings) up to a maximum of n (n < 0 means no limit).
-// Invalid UTF-8 sequences become correct encodings of U+FFF8.
+// explode splits s into a slice of UTF-8 strings,
+// one string per Unicode character up to a maximum of n (n < 0 means no limit).
+// Invalid UTF-8 sequences become correct encodings of U+FFFD.
 func explode(s string, n int) []string {
-	if n == 0 {
-		return nil
-	}
 	l := utf8.RuneCountInString(s)
-	if n <= 0 || n > l {
+	if n < 0 || n > l {
 		n = l
 	}
 	a := make([]string, n)
-	var size int
-	var ch rune
-	i, cur := 0, 0
-	for ; i+1 < n; i++ {
-		ch, size = utf8.DecodeRuneInString(s[cur:])
+	for i := 0; i < n-1; i++ {
+		ch, size := utf8.DecodeRuneInString(s)
+		a[i] = s[:size]
+		s = s[size:]
 		if ch == utf8.RuneError {
 			a[i] = string(utf8.RuneError)
-		} else {
-			a[i] = s[cur : cur+size]
 		}
-		cur += size
 	}
-	// add the rest, if there is any
-	if cur < len(s) {
-		a[i] = s[cur:]
+	if n > 0 {
+		a[n-1] = s
 	}
 	return a
 }
@@ -139,43 +134,6 @@ func ContainsAny(s, chars string) bool {
 // ContainsRune reports whether the Unicode code point r is within s.
 func ContainsRune(s string, r rune) bool {
 	return IndexRune(s, r) >= 0
-}
-
-// Index returns the index of the first instance of sep in s, or -1 if sep is not present in s.
-func Index(s, sep string) int {
-	n := len(sep)
-	switch {
-	case n == 0:
-		return 0
-	case n == 1:
-		return IndexByte(s, sep[0])
-	case n == len(s):
-		if sep == s {
-			return 0
-		}
-		return -1
-	case n > len(s):
-		return -1
-	}
-	// Rabin-Karp search
-	hashsep, pow := hashStr(sep)
-	var h uint32
-	for i := 0; i < n; i++ {
-		h = h*primeRK + uint32(s[i])
-	}
-	if h == hashsep && s[:n] == sep {
-		return 0
-	}
-	for i := n; i < len(s); {
-		h *= primeRK
-		h += uint32(s[i])
-		h -= pow * uint32(s[i-n])
-		i++
-		if h == hashsep && s[i-n:i] == sep {
-			return i - n
-		}
-	}
-	return -1
 }
 
 // LastIndex returns the index of the last instance of sep in s, or -1 if sep is not present in s.
@@ -381,14 +339,22 @@ func FieldsFunc(s string, f func(rune) bool) []string {
 	return a
 }
 
-// Join concatenates the elements of a to create a single string.   The separator string
+// Join concatenates the elements of a to create a single string. The separator string
 // sep is placed between elements in the resulting string.
 func Join(a []string, sep string) string {
-	if len(a) == 0 {
+	switch len(a) {
+	case 0:
 		return ""
-	}
-	if len(a) == 1 {
+	case 1:
 		return a[0]
+	case 2:
+		// Special case for common small values.
+		// Remove if golang.org/issue/6714 is fixed
+		return a[0] + sep + a[1]
+	case 3:
+		// Special case for common small values.
+		// Remove if golang.org/issue/6714 is fixed
+		return a[0] + sep + a[1] + sep + a[2]
 	}
 	n := len(sep) * (len(a) - 1)
 	for i := 0; i < len(a); i++ {
@@ -419,8 +385,8 @@ func HasSuffix(s, suffix string) bool {
 // dropped from the string with no replacement.
 func Map(mapping func(rune) rune, s string) string {
 	// In the worst case, the string can grow when mapped, making
-	// things unpleasant.  But it's so rare we barge in assuming it's
-	// fine.  It could also shrink but that falls out naturally.
+	// things unpleasant. But it's so rare we barge in assuming it's
+	// fine. It could also shrink but that falls out naturally.
 	maxbytes := len(s) // length of b
 	nbytes := 0        // number of bytes encoded in b
 	// The output buffer b is initialized on demand, the first
@@ -749,7 +715,7 @@ func EqualFold(s, t string) bool {
 			return false
 		}
 
-		// General case.  SimpleFold(x) returns the next equivalent rune > x
+		// General case. SimpleFold(x) returns the next equivalent rune > x
 		// or wraps around to smaller values.
 		r := unicode.SimpleFold(sr)
 		for r != sr && r < tr {
@@ -761,6 +727,6 @@ func EqualFold(s, t string) bool {
 		return false
 	}
 
-	// One string is empty.  Are both?
+	// One string is empty. Are both?
 	return s == t
 }

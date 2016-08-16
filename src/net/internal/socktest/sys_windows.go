@@ -68,7 +68,7 @@ func (sw *Switch) Closesocket(s syscall.Handle) (err error) {
 	return nil
 }
 
-// Conenct wraps syscall.Connect.
+// Connect wraps syscall.Connect.
 func (sw *Switch) Connect(s syscall.Handle, sa syscall.Sockaddr) (err error) {
 	so := sw.sockso(s)
 	if so == nil {
@@ -97,7 +97,7 @@ func (sw *Switch) Connect(s syscall.Handle, sa syscall.Sockaddr) (err error) {
 	return nil
 }
 
-// ConenctEx wraps syscall.ConnectEx.
+// ConnectEx wraps syscall.ConnectEx.
 func (sw *Switch) ConnectEx(s syscall.Handle, sa syscall.Sockaddr, b *byte, n uint32, nwr *uint32, o *syscall.Overlapped) (err error) {
 	so := sw.sockso(s)
 	if so == nil {
@@ -152,5 +152,35 @@ func (sw *Switch) Listen(s syscall.Handle, backlog int) (err error) {
 		return so.Err
 	}
 	sw.stats.getLocked(so.Cookie).Listened++
+	return nil
+}
+
+// AcceptEx wraps syscall.AcceptEx.
+func (sw *Switch) AcceptEx(ls syscall.Handle, as syscall.Handle, b *byte, rxdatalen uint32, laddrlen uint32, raddrlen uint32, rcvd *uint32, overlapped *syscall.Overlapped) error {
+	so := sw.sockso(ls)
+	if so == nil {
+		return syscall.AcceptEx(ls, as, b, rxdatalen, laddrlen, raddrlen, rcvd, overlapped)
+	}
+	sw.fmu.RLock()
+	f, _ := sw.fltab[FilterAccept]
+	sw.fmu.RUnlock()
+
+	af, err := f.apply(so)
+	if err != nil {
+		return err
+	}
+	so.Err = syscall.AcceptEx(ls, as, b, rxdatalen, laddrlen, raddrlen, rcvd, overlapped)
+	if err = af.apply(so); err != nil {
+		return err
+	}
+
+	sw.smu.Lock()
+	defer sw.smu.Unlock()
+	if so.Err != nil {
+		sw.stats.getLocked(so.Cookie).AcceptFailed++
+		return so.Err
+	}
+	nso := sw.addLocked(as, so.Cookie.Family(), so.Cookie.Type(), so.Cookie.Protocol())
+	sw.stats.getLocked(nso.Cookie).Accepted++
 	return nil
 }

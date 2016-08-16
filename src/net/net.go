@@ -14,7 +14,7 @@ the same interfaces and similar Dial and Listen functions.
 
 The Dial function connects to a server:
 
-	conn, err := net.Dial("tcp", "google.com:80")
+	conn, err := net.Dial("tcp", "golang.org:80")
 	if err != nil {
 		// handle error
 	}
@@ -35,15 +35,64 @@ The Listen function creates servers:
 		}
 		go handleConnection(conn)
 	}
+
+Name Resolution
+
+The method for resolving domain names, whether indirectly with functions like Dial
+or directly with functions like LookupHost and LookupAddr, varies by operating system.
+
+On Unix systems, the resolver has two options for resolving names.
+It can use a pure Go resolver that sends DNS requests directly to the servers
+listed in /etc/resolv.conf, or it can use a cgo-based resolver that calls C
+library routines such as getaddrinfo and getnameinfo.
+
+By default the pure Go resolver is used, because a blocked DNS request consumes
+only a goroutine, while a blocked C call consumes an operating system thread.
+When cgo is available, the cgo-based resolver is used instead under a variety of
+conditions: on systems that do not let programs make direct DNS requests (OS X),
+when the LOCALDOMAIN environment variable is present (even if empty),
+when the RES_OPTIONS or HOSTALIASES environment variable is non-empty,
+when the ASR_CONFIG environment variable is non-empty (OpenBSD only),
+when /etc/resolv.conf or /etc/nsswitch.conf specify the use of features that the
+Go resolver does not implement, and when the name being looked up ends in .local
+or is an mDNS name.
+
+The resolver decision can be overridden by setting the netdns value of the
+GODEBUG environment variable (see package runtime) to go or cgo, as in:
+
+	export GODEBUG=netdns=go    # force pure Go resolver
+	export GODEBUG=netdns=cgo   # force cgo resolver
+
+The decision can also be forced while building the Go source tree
+by setting the netgo or netcgo build tag.
+
+A numeric netdns setting, as in GODEBUG=netdns=1, causes the resolver
+to print debugging information about its decisions.
+To force a particular resolver while also printing debugging information,
+join the two settings by a plus sign, as in GODEBUG=netdns=go+1.
+
+On Plan 9, the resolver always accesses /net/cs and /net/dns.
+
+On Windows, the resolver always uses C library functions, such as GetAddrInfo and DnsQuery.
+
 */
 package net
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"syscall"
 	"time"
+)
+
+// netGo and netCgo contain the state of the build tags used
+// to build this binary, and whether cgo is available.
+// conf.go mirrors these into conf for easier testing.
+var (
+	netGo  bool // set true in cgo_stub.go for build tag "netgo" (or no cgo)
+	netCgo bool // set true in conf_netcgo.go for build tag "netcgo"
 )
 
 func init() {
@@ -249,7 +298,7 @@ func (c *conn) File() (f *os.File, err error) {
 // Multiple goroutines may invoke methods on a PacketConn simultaneously.
 type PacketConn interface {
 	// ReadFrom reads a packet from the connection,
-	// copying the payload into b.  It returns the number of
+	// copying the payload into b. It returns the number of
 	// bytes copied into b and the return address that
 	// was on the packet.
 	// ReadFrom can be made to time out and return
@@ -297,7 +346,7 @@ var listenerBacklog = maxListenerBacklog()
 // Multiple goroutines may invoke methods on a Listener simultaneously.
 type Listener interface {
 	// Accept waits for and returns the next connection to the listener.
-	Accept() (c Conn, err error)
+	Accept() (Conn, error)
 
 	// Close closes the listener.
 	// Any blocked Accept operations will be unblocked and return errors.
@@ -316,14 +365,34 @@ type Error interface {
 
 // Various errors contained in OpError.
 var (
+	// For connection setup operations.
+	errNoSuitableAddress = errors.New("no suitable address found")
+
 	// For connection setup and write operations.
 	errMissingAddress = errors.New("missing address")
 
 	// For both read and write operations.
 	errTimeout          error = &timeoutError{}
+	errCanceled               = errors.New("operation was canceled")
 	errClosing                = errors.New("use of closed network connection")
 	ErrWriteToConnected       = errors.New("use of WriteTo with pre-connected connection")
 )
+
+// mapErr maps from the context errors to the historical internal net
+// error values.
+//
+// TODO(bradfitz): get rid of this after adjusting tests and making
+// context.DeadlineExceeded implement net.Error?
+func mapErr(err error) error {
+	switch err {
+	case context.Canceled:
+		return errCanceled
+	case context.DeadlineExceeded:
+		return errTimeout
+	default:
+		return err
+	}
+}
 
 // OpError is the error type usually returned by functions in the net
 // package. It describes the operation, network type, and address of
@@ -377,7 +446,16 @@ func (e *OpError) Error() string {
 	return s
 }
 
-var noDeadline = time.Time{}
+var (
+	// aLongTimeAgo is a non-zero time, far in the past, used for
+	// immediate cancelation of dials.
+	aLongTimeAgo = time.Unix(233431200, 0)
+
+	// nonDeadline and noCancel are just zero values for
+	// readability with functions taking too many parameters.
+	noDeadline = time.Time{}
+	noCancel   = (chan struct{})(nil)
+)
 
 type timeout interface {
 	Timeout() bool
@@ -471,10 +549,11 @@ var (
 
 // DNSError represents a DNS lookup error.
 type DNSError struct {
-	Err       string // description of the error
-	Name      string // name looked for
-	Server    string // server used
-	IsTimeout bool   // if true, timed out; not all timeouts set this
+	Err         string // description of the error
+	Name        string // name looked for
+	Server      string // server used
+	IsTimeout   bool   // if true, timed out; not all timeouts set this
+	IsTemporary bool   // if true, error is temporary; not all errors set this
 }
 
 func (e *DNSError) Error() string {
@@ -497,7 +576,7 @@ func (e *DNSError) Timeout() bool { return e.IsTimeout }
 // Temporary reports whether the DNS error is known to be temporary.
 // This is not always known; a DNS lookup may fail due to a temporary
 // error and return a DNSError for which Temporary returns false.
-func (e *DNSError) Temporary() bool { return e.IsTimeout }
+func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary }
 
 type writerOnly struct {
 	io.Writer

@@ -5,6 +5,7 @@
 package color
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -15,8 +16,18 @@ func delta(x, y uint8) uint8 {
 	return y - x
 }
 
+func eq(c0, c1 Color) error {
+	r0, g0, b0, a0 := c0.RGBA()
+	r1, g1, b1, a1 := c1.RGBA()
+	if r0 != r1 || g0 != g1 || b0 != b1 || a0 != a1 {
+		return fmt.Errorf("got  0x%04x 0x%04x 0x%04x 0x%04x\nwant 0x%04x 0x%04x 0x%04x 0x%04x",
+			r0, g0, b0, a0, r1, g1, b1, a1)
+	}
+	return nil
+}
+
 // TestYCbCrRoundtrip tests that a subset of RGB space can be converted to YCbCr
-// and back to within 1/256 tolerance.
+// and back to within 2/256 tolerance.
 func TestYCbCrRoundtrip(t *testing.T) {
 	for r := 0; r < 256; r += 7 {
 		for g := 0; g < 256; g += 5 {
@@ -24,8 +35,9 @@ func TestYCbCrRoundtrip(t *testing.T) {
 				r0, g0, b0 := uint8(r), uint8(g), uint8(b)
 				y, cb, cr := RGBToYCbCr(r0, g0, b0)
 				r1, g1, b1 := YCbCrToRGB(y, cb, cr)
-				if delta(r0, r1) > 1 || delta(g0, g1) > 1 || delta(b0, b1) > 1 {
-					t.Fatalf("\nr0, g0, b0 = %d, %d, %d\nr1, g1, b1 = %d, %d, %d", r0, g0, b0, r1, g1, b1)
+				if delta(r0, r1) > 2 || delta(g0, g1) > 2 || delta(b0, b1) > 2 {
+					t.Fatalf("\nr0, g0, b0 = %d, %d, %d\ny,  cb, cr = %d, %d, %d\nr1, g1, b1 = %d, %d, %d",
+						r0, g0, b0, y, cb, cr, r1, g1, b1)
 				}
 			}
 		}
@@ -52,6 +64,39 @@ func TestYCbCrToRGBConsistency(t *testing.T) {
 	}
 }
 
+// TestYCbCrGray tests that YCbCr colors are a superset of Gray colors.
+func TestYCbCrGray(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		c0 := YCbCr{uint8(i), 0x80, 0x80}
+		c1 := Gray{uint8(i)}
+		if err := eq(c0, c1); err != nil {
+			t.Errorf("i=0x%02x:\n%v", i, err)
+		}
+	}
+}
+
+// TestNYCbCrAAlpha tests that NYCbCrA colors are a superset of Alpha colors.
+func TestNYCbCrAAlpha(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		c0 := NYCbCrA{YCbCr{0xff, 0x80, 0x80}, uint8(i)}
+		c1 := Alpha{uint8(i)}
+		if err := eq(c0, c1); err != nil {
+			t.Errorf("i=0x%02x:\n%v", i, err)
+		}
+	}
+}
+
+// TestNYCbCrAYCbCr tests that NYCbCrA colors are a superset of YCbCr colors.
+func TestNYCbCrAYCbCr(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		c0 := NYCbCrA{YCbCr{uint8(i), 0x40, 0xc0}, 0xff}
+		c1 := YCbCr{uint8(i), 0x40, 0xc0}
+		if err := eq(c0, c1); err != nil {
+			t.Errorf("i=0x%02x:\n%v", i, err)
+		}
+	}
+}
+
 // TestCMYKRoundtrip tests that a subset of RGB space can be converted to CMYK
 // and back to within 1/256 tolerance.
 func TestCMYKRoundtrip(t *testing.T) {
@@ -62,7 +107,8 @@ func TestCMYKRoundtrip(t *testing.T) {
 				c, m, y, k := RGBToCMYK(r0, g0, b0)
 				r1, g1, b1 := CMYKToRGB(c, m, y, k)
 				if delta(r0, r1) > 1 || delta(g0, g1) > 1 || delta(b0, b1) > 1 {
-					t.Fatalf("\nr0, g0, b0 = %d, %d, %d\nr1, g1, b1 = %d, %d, %d", r0, g0, b0, r1, g1, b1)
+					t.Fatalf("\nr0, g0, b0 = %d, %d, %d\nc, m, y, k = %d, %d, %d, %d\nr1, g1, b1 = %d, %d, %d",
+						r0, g0, b0, c, m, y, k, r1, g1, b1)
 				}
 			}
 		}
@@ -91,6 +137,15 @@ func TestCMYKToRGBConsistency(t *testing.T) {
 	}
 }
 
+// TestCMYKGray tests that CMYK colors are a superset of Gray colors.
+func TestCMYKGray(t *testing.T) {
+	for i := 0; i < 256; i++ {
+		if err := eq(CMYK{0x00, 0x00, 0x00, uint8(255 - i)}, Gray{uint8(i)}); err != nil {
+			t.Errorf("i=0x%02x:\n%v", i, err)
+		}
+	}
+}
+
 func TestPalette(t *testing.T) {
 	p := Palette{
 		RGBA{0xff, 0xff, 0xff, 0xff},
@@ -115,4 +170,48 @@ func TestPalette(t *testing.T) {
 	if got != want {
 		t.Errorf("got %v, want %v", got, want)
 	}
+}
+
+var sink uint8
+
+func BenchmarkYCbCrToRGB(b *testing.B) {
+	// YCbCrToRGB does saturating arithmetic.
+	// Low, middle, and high values can take
+	// different paths through the generated code.
+	b.Run("0", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = YCbCrToRGB(0, 0, 0)
+		}
+	})
+	b.Run("128", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = YCbCrToRGB(128, 128, 128)
+		}
+	})
+	b.Run("255", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = YCbCrToRGB(255, 255, 255)
+		}
+	})
+}
+
+func BenchmarkRGBToYCbCr(b *testing.B) {
+	// RGBToYCbCr does saturating arithmetic.
+	// Different values can take different paths
+	// through the generated code.
+	b.Run("0", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = RGBToYCbCr(0, 0, 0)
+		}
+	})
+	b.Run("Cb", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = RGBToYCbCr(0, 0, 255)
+		}
+	})
+	b.Run("Cr", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			sink, sink, sink = RGBToYCbCr(255, 0, 0)
+		}
+	})
 }

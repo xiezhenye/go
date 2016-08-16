@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -747,7 +747,7 @@ func TestStorePointer(t *testing.T) {
 // (Is the function atomic?)
 //
 // For each function, we write a "hammer" function that repeatedly
-// uses the atomic operation to add 1 to a value.  After running
+// uses the atomic operation to add 1 to a value. After running
 // multiple hammers in parallel, check that we end with the correct
 // total.
 // Swap can't add 1, so it uses a different scheme.
@@ -1403,13 +1403,6 @@ func TestUnaligned64(t *testing.T) {
 }
 
 func TestNilDeref(t *testing.T) {
-	switch runtime.GOOS {
-	case "darwin", "freebsd", "netbsd":
-		switch runtime.GOARCH {
-		case "arm", "arm64":
-			t.Skipf("issue 7338: skipping test on %s/%s", runtime.GOOS, runtime.GOARCH)
-		}
-	}
 	funcs := [...]func(){
 		func() { CompareAndSwapInt32(nil, 0, 0) },
 		func() { CompareAndSwapInt64(nil, 0, 0) },

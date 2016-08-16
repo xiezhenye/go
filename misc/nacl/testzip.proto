@@ -18,26 +18,32 @@ go	src=..
 					asm
 						testdata
 							+
+			doc
+				main.go
+				pkg.go
+				doc_test.go
+				testdata
+					+
 			internal
 				objfile
 					objfile.go
-				rsc.io
-					arm
-						armasm
-							testdata
-								+
-					x86
-						x86asm
-							testdata
-								+
 			gofmt
 				gofmt.go
 				gofmt_test.go
 				testdata
 					+
-			newlink
-				testdata
-					+
+			vendor
+				golang.org
+					x
+						arch
+							arm
+								armasm
+									testdata
+										+
+							x86
+								x86asm
+									testdata
+										+
 		archive
 			tar
 				testdata
@@ -50,6 +56,8 @@ go	src=..
 				testdata
 					+
 			flate
+				testdata
+					+
 			gzip
 				testdata
 					+
@@ -99,6 +107,10 @@ go	src=..
 			gif
 			jpeg
 			png
+				testdata
+					+
+		internal
+			trace
 				testdata
 					+
 		io

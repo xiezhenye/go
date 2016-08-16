@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors.  All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -12,7 +12,7 @@ import (
 // labels checks correct label use in body.
 func (check *Checker) labels(body *ast.BlockStmt) {
 	// set of all labels in this body
-	all := NewScope(nil, "label")
+	all := NewScope(nil, body.Pos(), body.End(), "label")
 
 	fwdJumps := check.blockBranches(all, nil, nil, body.List)
 

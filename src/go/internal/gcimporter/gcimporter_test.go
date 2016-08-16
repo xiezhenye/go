@@ -5,7 +5,8 @@
 package gcimporter
 
 import (
-	"go/build"
+	"fmt"
+	"internal/testenv"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -32,41 +33,42 @@ func skipSpecialPlatforms(t *testing.T) {
 	}
 }
 
-var gcPath string // Go compiler path
-
-func init() {
-	if char, err := build.ArchChar(runtime.GOARCH); err == nil {
-		gcPath = filepath.Join(build.ToolDir, char+"g")
-		return
-	}
-	gcPath = "unknown-GOARCH-compiler"
-}
-
 func compile(t *testing.T, dirname, filename string) string {
-	cmd := exec.Command(gcPath, filename)
+	testenv.MustHaveGoBuild(t)
+	cmd := exec.Command("go", "tool", "compile", filename)
 	cmd.Dir = dirname
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("%s", out)
-		t.Fatalf("%s %s failed: %s", gcPath, filename, err)
+		t.Fatalf("go tool compile %s failed: %s", filename, err)
 	}
 	// filename should end with ".go"
 	return filepath.Join(dirname, filename[:len(filename)-2]+"o")
 }
 
-// Use the same global imports map for all tests. The effect is
-// as if all tested packages were imported into a single package.
-var imports = make(map[string]*types.Package)
+// TODO(gri) Remove this function once we switched to new export format by default.
+func compileNewExport(t *testing.T, dirname, filename string) string {
+	testenv.MustHaveGoBuild(t)
+	cmd := exec.Command("go", "tool", "compile", "-newexport", filename)
+	cmd.Dir = dirname
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("%s", out)
+		t.Fatalf("go tool compile %s failed: %s", filename, err)
+	}
+	// filename should end with ".go"
+	return filepath.Join(dirname, filename[:len(filename)-2]+"o")
+}
 
-func testPath(t *testing.T, path string) bool {
+func testPath(t *testing.T, path, srcDir string) *types.Package {
 	t0 := time.Now()
-	_, err := Import(imports, path)
+	pkg, err := Import(make(map[string]*types.Package), path, srcDir)
 	if err != nil {
 		t.Errorf("testPath(%s): %s", path, err)
-		return false
+		return nil
 	}
 	t.Logf("testPath(%s): %v", path, time.Since(t0))
-	return true
+	return pkg
 }
 
 const maxTime = 30 * time.Second
@@ -88,7 +90,7 @@ func testDir(t *testing.T, dir string, endTime time.Time) (nimports int) {
 			for _, ext := range pkgExts {
 				if strings.HasSuffix(f.Name(), ext) {
 					name := f.Name()[0 : len(f.Name())-len(ext)] // remove extension
-					if testPath(t, filepath.Join(dir, name)) {
+					if testPath(t, filepath.Join(dir, name), dir) != nil {
 						nimports++
 					}
 				}
@@ -100,28 +102,73 @@ func testDir(t *testing.T, dir string, endTime time.Time) (nimports int) {
 	return
 }
 
-func TestImport(t *testing.T) {
+func TestImportTestdata(t *testing.T) {
 	// This package only handles gc export data.
 	if runtime.Compiler != "gc" {
 		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
 		return
 	}
 
-	// On cross-compile builds, the path will not exist.
-	// Need to use GOHOSTOS, which is not available.
-	if _, err := os.Stat(gcPath); err != nil {
-		t.Skipf("skipping test: %v", err)
-	}
-
 	if outFn := compile(t, "testdata", "exports.go"); outFn != "" {
 		defer os.Remove(outFn)
 	}
 
-	nimports := 0
-	if testPath(t, "./testdata/exports") {
-		nimports++
+	if pkg := testPath(t, "./testdata/exports", "."); pkg != nil {
+		// The package's Imports list must include all packages
+		// explicitly imported by exports.go, plus all packages
+		// referenced indirectly via exported objects in exports.go.
+		// With the textual export format, the list may also include
+		// additional packages that are not strictly required for
+		// import processing alone (they are exported to err "on
+		// the safe side").
+		got := fmt.Sprint(pkg.Imports())
+		for _, want := range []string{"go/ast", "go/token"} {
+			if !strings.Contains(got, want) {
+				t.Errorf(`Package("exports").Imports() = %s, does not contain %s`, got, want)
+			}
+		}
 	}
-	nimports += testDir(t, "", time.Now().Add(maxTime)) // installed packages
+}
+
+// TODO(gri) Remove this function once we switched to new export format by default
+//           (and update the comment and want list in TestImportTestdata).
+func TestImportTestdataNewExport(t *testing.T) {
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	if outFn := compileNewExport(t, "testdata", "exports.go"); outFn != "" {
+		defer os.Remove(outFn)
+	}
+
+	if pkg := testPath(t, "./testdata/exports", "."); pkg != nil {
+		// The package's Imports list must include all packages
+		// explicitly imported by exports.go, plus all packages
+		// referenced indirectly via exported objects in exports.go.
+		want := `[package ast ("go/ast") package token ("go/token")]`
+		got := fmt.Sprint(pkg.Imports())
+		if got != want {
+			t.Errorf(`Package("exports").Imports() = %s, want %s`, got, want)
+		}
+	}
+}
+
+func TestImportStdLib(t *testing.T) {
+	skipSpecialPlatforms(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	dt := maxTime
+	if testing.Short() && testenv.Builder() == "" {
+		dt = 10 * time.Millisecond
+	}
+	nimports := testDir(t, "", time.Now().Add(dt)) // installed packages
 	t.Logf("tested %d imports", nimports)
 }
 
@@ -153,7 +200,7 @@ func TestImportedTypes(t *testing.T) {
 		importPath := s[0]
 		objName := s[1]
 
-		pkg, err := Import(imports, importPath)
+		pkg, err := Import(make(map[string]*types.Package), importPath, ".")
 		if err != nil {
 			t.Error(err)
 			continue
@@ -165,7 +212,7 @@ func TestImportedTypes(t *testing.T) {
 			continue
 		}
 
-		got := types.ObjectString(pkg, obj)
+		got := types.ObjectString(obj, types.RelativeTo(pkg))
 		if got != test.want {
 			t.Errorf("%s: got %q; want %q", test.name, got, test.want)
 		}
@@ -181,7 +228,7 @@ func TestIssue5815(t *testing.T) {
 		return
 	}
 
-	pkg, err := Import(make(map[string]*types.Package), "strings")
+	pkg, err := Import(make(map[string]*types.Package), "strings", ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +262,7 @@ func TestCorrectMethodPackage(t *testing.T) {
 	}
 
 	imports := make(map[string]*types.Package)
-	_, err := Import(imports, "net/http")
+	_, err := Import(imports, "net/http", ".")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,5 +273,155 @@ func TestCorrectMethodPackage(t *testing.T) {
 	lock := sel.Obj().(*types.Func)
 	if got, want := lock.Pkg().Path(), "sync"; got != want {
 		t.Errorf("got package path %q; want %q", got, want)
+	}
+}
+
+func TestIssue13566(t *testing.T) {
+	skipSpecialPlatforms(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	// On windows, we have to set the -D option for the compiler to avoid having a drive
+	// letter and an illegal ':' in the import path - just skip it (see also issue #3483).
+	if runtime.GOOS == "windows" {
+		t.Skip("avoid dealing with relative paths/drive letters on windows")
+	}
+
+	if f := compile(t, "testdata", "a.go"); f != "" {
+		defer os.Remove(f)
+	}
+	if f := compile(t, "testdata", "b.go"); f != "" {
+		defer os.Remove(f)
+	}
+
+	// import must succeed (test for issue at hand)
+	pkg, err := Import(make(map[string]*types.Package), "./testdata/b", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// make sure all indirectly imported packages have names
+	for _, imp := range pkg.Imports() {
+		if imp.Name() == "" {
+			t.Errorf("no name for %s package", imp.Path())
+		}
+	}
+}
+
+func TestIssue13898(t *testing.T) {
+	skipSpecialPlatforms(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	// import go/internal/gcimporter which imports go/types partially
+	imports := make(map[string]*types.Package)
+	_, err := Import(imports, "go/internal/gcimporter", ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// look for go/types package
+	var goTypesPkg *types.Package
+	for path, pkg := range imports {
+		if path == "go/types" {
+			goTypesPkg = pkg
+			break
+		}
+	}
+	if goTypesPkg == nil {
+		t.Fatal("go/types not found")
+	}
+
+	// look for go/types.Object type
+	obj := goTypesPkg.Scope().Lookup("Object")
+	if obj == nil {
+		t.Fatal("go/types.Object not found")
+	}
+	typ, ok := obj.Type().(*types.Named)
+	if !ok {
+		t.Fatalf("go/types.Object type is %v; wanted named type", typ)
+	}
+
+	// lookup go/types.Object.Pkg method
+	m, index, indirect := types.LookupFieldOrMethod(typ, false, nil, "Pkg")
+	if m == nil {
+		t.Fatalf("go/types.Object.Pkg not found (index = %v, indirect = %v)", index, indirect)
+	}
+
+	// the method must belong to go/types
+	if m.Pkg().Path() != "go/types" {
+		t.Fatalf("found %v; want go/types", m.Pkg())
+	}
+}
+
+func TestIssue15517(t *testing.T) {
+	skipSpecialPlatforms(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	// On windows, we have to set the -D option for the compiler to avoid having a drive
+	// letter and an illegal ':' in the import path - just skip it (see also issue #3483).
+	if runtime.GOOS == "windows" {
+		t.Skip("avoid dealing with relative paths/drive letters on windows")
+	}
+
+	if f := compile(t, "testdata", "p.go"); f != "" {
+		defer os.Remove(f)
+	}
+
+	// Multiple imports of p must succeed without redeclaration errors.
+	// We use an import path that's not cleaned up so that the eventual
+	// file path for the package is different from the package path; this
+	// will expose the error if it is present.
+	//
+	// (Issue: Both the textual and the binary importer used the file path
+	// of the package to be imported as key into the shared packages map.
+	// However, the binary importer then used the package path to identify
+	// the imported package to mark it as complete; effectively marking the
+	// wrong package as complete. By using an "unclean" package path, the
+	// file and package path are different, exposing the problem if present.
+	// The same issue occurs with vendoring.)
+	imports := make(map[string]*types.Package)
+	for i := 0; i < 3; i++ {
+		if _, err := Import(imports, "./././testdata/p", "."); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestIssue15920(t *testing.T) {
+	skipSpecialPlatforms(t)
+
+	// This package only handles gc export data.
+	if runtime.Compiler != "gc" {
+		t.Skipf("gc-built packages not available (compiler = %s)", runtime.Compiler)
+		return
+	}
+
+	// On windows, we have to set the -D option for the compiler to avoid having a drive
+	// letter and an illegal ':' in the import path - just skip it (see also issue #3483).
+	if runtime.GOOS == "windows" {
+		t.Skip("avoid dealing with relative paths/drive letters on windows")
+	}
+
+	if f := compile(t, "testdata", "issue15920.go"); f != "" {
+		defer os.Remove(f)
+	}
+
+	imports := make(map[string]*types.Package)
+	if _, err := Import(imports, "./testdata/issue15920", "."); err != nil {
+		t.Fatal(err)
 	}
 }

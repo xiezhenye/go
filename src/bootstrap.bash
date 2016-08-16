@@ -1,5 +1,5 @@
-#!/bin/bash
-# Copyright 2015 The Go Authors.  All rights reserved.
+#!/usr/bin/env bash
+# Copyright 2015 The Go Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
@@ -35,8 +35,10 @@ cp -R "$src" "$targ"
 cd "$targ"
 echo
 echo "#### Cleaning $targ"
-rm .gitignore
-git clean -f -d
+rm -f .gitignore
+if [ -e .git ]; then
+	git clean -f -d
+fi
 echo
 echo "#### Building $targ"
 echo

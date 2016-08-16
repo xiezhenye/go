@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -31,25 +31,27 @@
 package ld
 
 import (
+	"bufio"
 	"cmd/internal/obj"
+	"cmd/internal/sys"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 )
 
-var pkglistfornote []byte
-
-// Reading object files.
+var (
+	pkglistfornote []byte
+	buildid        string
+)
 
 func Ldmain() {
-	Ctxt = linknew(Thelinkarch)
-	Ctxt.Thechar = int32(Thearch.Thechar)
-	Ctxt.Thestring = Thestring
-	Ctxt.Diag = Diag
-	Ctxt.Bso = &Bso
+	Bso = bufio.NewWriter(os.Stdout)
 
-	Bso = *obj.Binitw(os.Stdout)
+	Ctxt = linknew(SysArch)
+	Ctxt.Diag = Diag
+	Ctxt.Bso = Bso
+
 	Debug = [128]int{}
 	nerrors = 0
 	outfile = ""
@@ -60,68 +62,54 @@ func Ldmain() {
 	INITENTRY = ""
 	Linkmode = LinkAuto
 
-	// For testing behavior of go command when tools crash.
+	// For testing behavior of go command when tools crash silently.
 	// Undocumented, not in standard flag parser to avoid
 	// exposing in usage message.
 	for _, arg := range os.Args {
 		if arg == "-crash_for_testing" {
-			*(*int)(nil) = 0
+			os.Exit(2)
 		}
 	}
 
-	if Thearch.Thechar == '5' && Ctxt.Goarm == 5 {
-		Debug['F'] = 1
-	}
-
-	obj.Flagcount("1", "use alternate profiling code", &Debug['1'])
-	if Thearch.Thechar == '6' {
-		obj.Flagcount("8", "assume 64-bit addresses", &Debug['8'])
+	if SysArch.Family == sys.AMD64 && obj.Getgoos() == "plan9" {
+		obj.Flagcount("8", "use 64-bit addresses in symbol table", &Debug['8'])
 	}
 	obj.Flagfn1("B", "add an ELF NT_GNU_BUILD_ID `note` when using ELF", addbuildinfo)
 	obj.Flagcount("C", "check Go calls to C code", &Debug['C'])
 	obj.Flagint64("D", "set data segment `address`", &INITDAT)
 	obj.Flagstr("E", "set `entry` symbol name", &INITENTRY)
-	if Thearch.Thechar == '5' {
-		obj.Flagcount("G", "debug pseudo-ops", &Debug['G'])
-	}
 	obj.Flagfn1("I", "use `linker` as ELF dynamic linker", setinterp)
 	obj.Flagfn1("L", "add specified `directory` to library path", Lflag)
 	obj.Flagfn1("H", "set header `type`", setheadtype)
-	obj.Flagcount("K", "add stack underflow checks", &Debug['K'])
-	if Thearch.Thechar == '5' {
-		obj.Flagcount("M", "disable software div/mod", &Debug['M'])
-	}
-	obj.Flagcount("O", "print pc-line tables", &Debug['O'])
-	obj.Flagcount("Q", "debug byte-register code gen", &Debug['Q'])
-	if Thearch.Thechar == '5' {
-		obj.Flagcount("P", "debug code generation", &Debug['P'])
-	}
 	obj.Flagint32("R", "set address rounding `quantum`", &INITRND)
-	obj.Flagcount("nil", "check type signatures", &Debug['S'])
 	obj.Flagint64("T", "set text segment `address`", &INITTEXT)
 	obj.Flagfn0("V", "print version and exit", doversion)
-	obj.Flagcount("W", "disassemble input", &Debug['W'])
-	obj.Flagfn1("X", "set the value of a string variable; the next two arguments are its name and value", addstrdata1)
-	obj.Flagcount("Z", "clear stack frame on entry", &Debug['Z'])
+	obj.Flagfn1("X", "add string value `definition` of the form importpath.name=value", addstrdata1)
 	obj.Flagcount("a", "disassemble output", &Debug['a'])
+	obj.Flagstr("buildid", "record `id` as Go toolchain build id", &buildid)
 	flag.Var(&Buildmode, "buildmode", "set build `mode`")
 	obj.Flagcount("c", "dump call graph", &Debug['c'])
 	obj.Flagcount("d", "disable dynamic executable", &Debug['d'])
+	flag.BoolVar(&flag_dumpdep, "dumpdep", false, "dump symbol dependency graph")
+	obj.Flagstr("extar", "archive program for buildmode=c-archive", &extar)
 	obj.Flagstr("extld", "use `linker` when linking in external mode", &extld)
 	obj.Flagstr("extldflags", "pass `flags` to external linker", &extldflags)
 	obj.Flagcount("f", "ignore version mismatch", &Debug['f'])
 	obj.Flagcount("g", "disable go package data checks", &Debug['g'])
+	obj.Flagcount("h", "halt on error", &Debug['h'])
 	obj.Flagstr("installsuffix", "set package directory `suffix`", &flag_installsuffix)
 	obj.Flagstr("k", "set field tracking `symbol`", &tracksym)
+	obj.Flagstr("libgcc", "compiler support lib for internal linking; use \"none\" to disable", &libgccfile)
 	obj.Flagfn1("linkmode", "set link `mode` (internal, external, auto)", setlinkmode)
 	flag.BoolVar(&Linkshared, "linkshared", false, "link against installed Go shared libraries")
+	obj.Flagcount("msan", "enable MSan interface", &flag_msan)
 	obj.Flagcount("n", "dump symbol table", &Debug['n'])
 	obj.Flagstr("o", "write output to `file`", &outfile)
 	flag.Var(&rpath, "r", "set the ELF dynamic linker search `path` to dir1:dir2:...")
 	obj.Flagcount("race", "enable race detector", &flag_race)
 	obj.Flagcount("s", "disable symbol table", &Debug['s'])
 	var flagShared int
-	if Thearch.Thechar == '5' || Thearch.Thechar == '6' {
+	if SysArch.InFamily(sys.ARM, sys.AMD64) {
 		obj.Flagcount("shared", "generate shared object (implies -linkmode external)", &flagShared)
 	}
 	obj.Flagstr("tmpdir", "use `directory` for temporary files", &tmpdir)
@@ -129,30 +117,24 @@ func Ldmain() {
 	obj.Flagcount("v", "print link trace", &Debug['v'])
 	obj.Flagcount("w", "disable DWARF generation", &Debug['w'])
 
-	// Clumsy hack to preserve old behavior of -X taking two arguments.
-	for i := 0; i < len(os.Args); i++ {
-		arg := os.Args[i]
-		if (arg == "--X" || arg == "-X") && i+2 < len(os.Args) {
-			os.Args[i+2] = "-X=VALUE:" + os.Args[i+2]
-			i += 2
-		} else if (strings.HasPrefix(arg, "--X=") || strings.HasPrefix(arg, "-X=")) && i+1 < len(os.Args) {
-			os.Args[i+1] = "-X=VALUE:" + os.Args[i+1]
-			i++
-		}
-	}
 	obj.Flagstr("cpuprofile", "write cpu profile to `file`", &cpuprofile)
 	obj.Flagstr("memprofile", "write memory profile to `file`", &memprofile)
 	obj.Flagint64("memprofilerate", "set runtime.MemProfileRate to `rate`", &memprofilerate)
+
 	obj.Flagparse(usage)
+
 	startProfile()
-	Ctxt.Bso = &Bso
+	Ctxt.Bso = Bso
 	Ctxt.Debugvlog = int32(Debug['v'])
 	if flagShared != 0 {
-		if Buildmode == BuildmodeExe {
+		if Buildmode == BuildmodeUnset {
 			Buildmode = BuildmodeCShared
 		} else if Buildmode != BuildmodeCShared {
 			Exitf("-shared and -buildmode=%s are incompatible", Buildmode.String())
 		}
+	}
+	if Buildmode == BuildmodeUnset {
+		Buildmode = BuildmodeExe
 	}
 
 	if Buildmode != BuildmodeShared && flag.NArg() != 1 {
@@ -183,7 +165,7 @@ func Ldmain() {
 	}
 
 	if Debug['v'] != 0 {
-		fmt.Fprintf(&Bso, "HEADER = -H%d -T0x%x -D0x%x -R0x%x\n", HEADTYPE, uint64(INITTEXT), uint64(INITDAT), uint32(INITRND))
+		fmt.Fprintf(Bso, "HEADER = -H%d -T0x%x -D0x%x -R0x%x\n", HEADTYPE, uint64(INITTEXT), uint64(INITDAT), uint32(INITRND))
 	}
 	Bso.Flush()
 
@@ -206,16 +188,9 @@ func Ldmain() {
 	}
 	loadlib()
 
-	if Thearch.Thechar == '5' {
-		// mark some functions that are only referenced after linker code editing
-		if Debug['F'] != 0 {
-			mark(Linkrlookup(Ctxt, "_sfloat", 0))
-		}
-		mark(Linklookup(Ctxt, "runtime.read_tls_fallback", 0))
-	}
-
-	checkgo()
-	deadcode()
+	checkstrdata()
+	deadcode(Ctxt)
+	fieldtrack(Ctxt)
 	callgraph()
 
 	doelf()
@@ -228,22 +203,22 @@ func Ldmain() {
 	}
 	addexport()
 	Thearch.Gentext() // trampolines, call stubs, etc.
+	textbuildid()
 	textaddress()
 	pclntab()
 	findfunctab()
 	symtab()
 	dodata()
 	address()
-	doweak()
 	reloc()
 	Thearch.Asmb()
 	undef()
 	hostlink()
 	archive()
 	if Debug['v'] != 0 {
-		fmt.Fprintf(&Bso, "%5.2f cpu time\n", obj.Cputime())
-		fmt.Fprintf(&Bso, "%d symbols\n", Ctxt.Nsymbol)
-		fmt.Fprintf(&Bso, "%d liveness data\n", liveness)
+		fmt.Fprintf(Bso, "%5.2f cpu time\n", obj.Cputime())
+		fmt.Fprintf(Bso, "%d symbols\n", len(Ctxt.Allsym))
+		fmt.Fprintf(Bso, "%d liveness data\n", liveness)
 	}
 
 	Bso.Flush()

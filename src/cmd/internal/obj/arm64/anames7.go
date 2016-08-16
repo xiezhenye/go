@@ -1,3 +1,7 @@
+// Copyright 2015 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
 package arm64
 
 var cnames7 = []string{
@@ -16,6 +20,7 @@ var cnames7 = []string{
 	"ADDCON",
 	"MOVCON",
 	"BITCON",
+	"ABCON0",
 	"ABCON",
 	"MBCON",
 	"LCON",
@@ -55,6 +60,9 @@ var cnames7 = []string{
 	"UOREG64K",
 	"LOREG",
 	"ADDR",
+	"GOTADDR",
+	"TLS_LE",
+	"TLS_IE",
 	"ROFF",
 	"GOK",
 	"TEXTSIZE",

@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -37,11 +37,116 @@ import (
 	"log"
 )
 
-func gentext() {
+// Append 4 bytes to s and create a R_CALL relocation targeting t to fill them in.
+func addcall(ctxt *ld.Link, s *ld.LSym, t *ld.LSym) {
+	s.Attr |= ld.AttrReachable
+	i := s.Size
+	s.Size += 4
+	ld.Symgrow(ctxt, s, s.Size)
+	r := ld.Addrel(s)
+	r.Sym = t
+	r.Off = int32(i)
+	r.Type = obj.R_CALL
+	r.Siz = 4
 }
 
-func adddynrela(rela *ld.LSym, s *ld.LSym, r *ld.Reloc) {
-	log.Fatalf("adddynrela not implemented")
+func gentext() {
+	if !ld.DynlinkingGo() && ld.Buildmode != ld.BuildmodePIE && ld.Buildmode != ld.BuildmodeCShared {
+		return
+	}
+
+	// Generate little thunks that load the PC of the next instruction into a register.
+	for _, r := range [...]struct {
+		name string
+		num  uint8
+	}{
+		{"ax", 0},
+		{"cx", 1},
+		{"dx", 2},
+		{"bx", 3},
+		// sp
+		{"bp", 5},
+		{"si", 6},
+		{"di", 7},
+	} {
+		thunkfunc := ld.Linklookup(ld.Ctxt, "__x86.get_pc_thunk."+r.name, 0)
+		thunkfunc.Type = obj.STEXT
+		thunkfunc.Attr |= ld.AttrLocal
+		thunkfunc.Attr |= ld.AttrReachable //TODO: remove?
+		o := func(op ...uint8) {
+			for _, op1 := range op {
+				ld.Adduint8(ld.Ctxt, thunkfunc, op1)
+			}
+		}
+		// 8b 04 24	mov    (%esp),%eax
+		// Destination register is in bits 3-5 of the middle byte, so add that in.
+		o(0x8b, 0x04+r.num<<3, 0x24)
+		// c3		ret
+		o(0xc3)
+
+		ld.Ctxt.Textp = append(ld.Ctxt.Textp, thunkfunc)
+	}
+
+	addmoduledata := ld.Linklookup(ld.Ctxt, "runtime.addmoduledata", 0)
+	if addmoduledata.Type == obj.STEXT {
+		// we're linking a module containing the runtime -> no need for
+		// an init function
+		return
+	}
+
+	addmoduledata.Attr |= ld.AttrReachable
+
+	initfunc := ld.Linklookup(ld.Ctxt, "go.link.addmoduledata", 0)
+	initfunc.Type = obj.STEXT
+	initfunc.Attr |= ld.AttrLocal
+	initfunc.Attr |= ld.AttrReachable
+	o := func(op ...uint8) {
+		for _, op1 := range op {
+			ld.Adduint8(ld.Ctxt, initfunc, op1)
+		}
+	}
+
+	// go.link.addmoduledata:
+	//      53                      push %ebx
+	//      e8 00 00 00 00          call __x86.get_pc_thunk.cx + R_CALL __x86.get_pc_thunk.cx
+	//      8d 81 00 00 00 00       lea 0x0(%ecx), %eax + R_PCREL ld.Ctxt.Moduledata
+	//      8d 99 00 00 00 00       lea 0x0(%ecx), %ebx + R_GOTPC _GLOBAL_OFFSET_TABLE_
+	//      e8 00 00 00 00          call runtime.addmoduledata@plt + R_CALL runtime.addmoduledata
+	//      5b                      pop %ebx
+	//      c3                      ret
+
+	o(0x53)
+
+	o(0xe8)
+	addcall(ld.Ctxt, initfunc, ld.Linklookup(ld.Ctxt, "__x86.get_pc_thunk.cx", 0))
+
+	o(0x8d, 0x81)
+	ld.Addpcrelplus(ld.Ctxt, initfunc, ld.Ctxt.Moduledata, 6)
+
+	o(0x8d, 0x99)
+	i := initfunc.Size
+	initfunc.Size += 4
+	ld.Symgrow(ld.Ctxt, initfunc, initfunc.Size)
+	r := ld.Addrel(initfunc)
+	r.Sym = ld.Linklookup(ld.Ctxt, "_GLOBAL_OFFSET_TABLE_", 0)
+	r.Off = int32(i)
+	r.Type = obj.R_PCREL
+	r.Add = 12
+	r.Siz = 4
+
+	o(0xe8)
+	addcall(ld.Ctxt, initfunc, addmoduledata)
+
+	o(0x5b)
+
+	o(0xc3)
+
+	ld.Ctxt.Textp = append(ld.Ctxt.Textp, initfunc)
+	initarray_entry := ld.Linklookup(ld.Ctxt, "go.link.addmoduledatainit", 0)
+	initarray_entry.Attr |= ld.AttrReachable
+	initarray_entry.Attr |= ld.AttrLocal
+	initarray_entry.Type = obj.SINITARR
+	ld.Addaddr(ld.Ctxt, initarray_entry, initfunc)
 }
 
 func adddynrel(s *ld.LSym, r *ld.Reloc) {
@@ -78,7 +183,7 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 
 		return
 
-	case 256 + ld.R_386_GOT32:
+	case 256 + ld.R_386_GOT32, 256 + ld.R_386_GOT32X:
 		if targ.Type != obj.SDYNIMPORT {
 			// have symbol
 			if r.Off >= 2 && s.P[r.Off-2] == 0x8b {
@@ -193,14 +298,14 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 			return
 		}
 
-		if ld.HEADTYPE == obj.Hdarwin && s.Size == PtrSize && r.Off == 0 {
+		if ld.HEADTYPE == obj.Hdarwin && s.Size == int64(ld.SysArch.PtrSize) && r.Off == 0 {
 			// Mach-O relocations are a royal pain to lay out.
 			// They use a compact stateful bytecode representation
 			// that is too much bother to deal with.
 			// Instead, interpret the C declaration
 			//	void *_Cvar_stderr = &stderr;
 			// as making _Cvar_stderr the name of a GOT entry
-			// for stderr.  This is separate from the usual GOT entry,
+			// for stderr. This is separate from the usual GOT entry,
 			// just in case the C code assigns to the variable,
 			// and of course it only works for single pointers,
 			// but we only need to support cgo and that's all it needs.
@@ -218,7 +323,7 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 			return
 		}
 
-		if ld.HEADTYPE == obj.Hwindows && s.Size == PtrSize {
+		if ld.HEADTYPE == obj.Hwindows && s.Size == int64(ld.SysArch.PtrSize) {
 			// nothing to do, the relocation will be laid out in pereloc1
 			return
 		}
@@ -231,7 +336,7 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 func elfreloc1(r *ld.Reloc, sectoff int64) int {
 	ld.Thearch.Lput(uint32(sectoff))
 
-	elfsym := r.Xsym.Elfsym
+	elfsym := r.Xsym.ElfsymForReloc()
 	switch r.Type {
 	default:
 		return -1
@@ -243,8 +348,29 @@ func elfreloc1(r *ld.Reloc, sectoff int64) int {
 			return -1
 		}
 
-	case obj.R_CALL,
-		obj.R_PCREL:
+	case obj.R_GOTPCREL:
+		if r.Siz == 4 {
+			ld.Thearch.Lput(ld.R_386_GOTPC)
+			if r.Xsym.Name != "_GLOBAL_OFFSET_TABLE_" {
+				ld.Thearch.Lput(uint32(sectoff))
+				ld.Thearch.Lput(ld.R_386_GOT32 | uint32(elfsym)<<8)
+			}
+		} else {
+			return -1
+		}
+
+	case obj.R_CALL:
+		if r.Siz == 4 {
+			if r.Xsym.Type == obj.SDYNIMPORT {
+				ld.Thearch.Lput(ld.R_386_PLT32 | uint32(elfsym)<<8)
+			} else {
+				ld.Thearch.Lput(ld.R_386_PC32 | uint32(elfsym)<<8)
+			}
+		} else {
+			return -1
+		}
+
+	case obj.R_PCREL:
 		if r.Siz == 4 {
 			ld.Thearch.Lput(ld.R_386_PC32 | uint32(elfsym)<<8)
 		} else {
@@ -254,6 +380,15 @@ func elfreloc1(r *ld.Reloc, sectoff int64) int {
 	case obj.R_TLS_LE:
 		if r.Siz == 4 {
 			ld.Thearch.Lput(ld.R_386_TLS_LE | uint32(elfsym)<<8)
+		} else {
+			return -1
+		}
+
+	case obj.R_TLS_IE:
+		if r.Siz == 4 {
+			ld.Thearch.Lput(ld.R_386_GOTPC)
+			ld.Thearch.Lput(uint32(sectoff))
+			ld.Thearch.Lput(ld.R_386_TLS_GOTIE | uint32(elfsym)<<8)
 		} else {
 			return -1
 		}
@@ -480,7 +615,7 @@ func addgotsym(ctxt *ld.Link, s *ld.LSym) {
 
 func asmb() {
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f asmb\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f asmb\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 
@@ -490,7 +625,8 @@ func asmb() {
 
 	sect := ld.Segtext.Sect
 	ld.Cseek(int64(sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff))
-	ld.Codeblk(int64(sect.Vaddr), int64(sect.Length))
+	// 0xCC is INT $3 - breakpoint instruction
+	ld.CodeblkPad(int64(sect.Vaddr), int64(sect.Length), []byte{0xCC})
 	for sect = sect.Next; sect != nil; sect = sect.Next {
 		ld.Cseek(int64(sect.Vaddr - ld.Segtext.Vaddr + ld.Segtext.Fileoff))
 		ld.Datblk(int64(sect.Vaddr), int64(sect.Length))
@@ -498,7 +634,7 @@ func asmb() {
 
 	if ld.Segrodata.Filelen > 0 {
 		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f rodatblk\n", obj.Cputime())
+			fmt.Fprintf(ld.Bso, "%5.2f rodatblk\n", obj.Cputime())
 		}
 		ld.Bso.Flush()
 
@@ -507,26 +643,18 @@ func asmb() {
 	}
 
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f datblk\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f datblk\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 
 	ld.Cseek(int64(ld.Segdata.Fileoff))
 	ld.Datblk(int64(ld.Segdata.Vaddr), int64(ld.Segdata.Filelen))
 
+	ld.Cseek(int64(ld.Segdwarf.Fileoff))
+	ld.Dwarfblk(int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
+
 	machlink := uint32(0)
 	if ld.HEADTYPE == obj.Hdarwin {
-		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
-		}
-
-		dwarfoff := uint32(ld.Rnd(int64(uint64(ld.HEADR)+ld.Segtext.Length), int64(ld.INITRND)) + ld.Rnd(int64(ld.Segdata.Filelen), int64(ld.INITRND)))
-		ld.Cseek(int64(dwarfoff))
-
-		ld.Segdwarf.Fileoff = uint64(ld.Cpos())
-		ld.Dwarfemitdebugsections()
-		ld.Segdwarf.Filelen = uint64(ld.Cpos()) - ld.Segdwarf.Fileoff
-
 		machlink = uint32(ld.Domacholink())
 	}
 
@@ -537,13 +665,13 @@ func asmb() {
 	if ld.Debug['s'] == 0 {
 		// TODO: rationalize
 		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f sym\n", obj.Cputime())
+			fmt.Fprintf(ld.Bso, "%5.2f sym\n", obj.Cputime())
 		}
 		ld.Bso.Flush()
 		switch ld.HEADTYPE {
 		default:
 			if ld.Iself {
-				symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
+				symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
 				symo = uint32(ld.Rnd(int64(symo), int64(ld.INITRND)))
 			}
 
@@ -554,7 +682,7 @@ func asmb() {
 			symo = uint32(ld.Segdwarf.Fileoff + uint64(ld.Rnd(int64(ld.Segdwarf.Filelen), int64(ld.INITRND))) + uint64(machlink))
 
 		case obj.Hwindows:
-			symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
+			symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
 			symo = uint32(ld.Rnd(int64(symo), ld.PEFILEALIGN))
 		}
 
@@ -563,16 +691,11 @@ func asmb() {
 		default:
 			if ld.Iself {
 				if ld.Debug['v'] != 0 {
-					fmt.Fprintf(&ld.Bso, "%5.2f elfsym\n", obj.Cputime())
+					fmt.Fprintf(ld.Bso, "%5.2f elfsym\n", obj.Cputime())
 				}
 				ld.Asmelfsym()
 				ld.Cflush()
 				ld.Cwrite(ld.Elfstrdat)
-
-				if ld.Debug['v'] != 0 {
-					fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
-				}
-				ld.Dwarfemitdebugsections()
 
 				if ld.Linkmode == ld.LinkExternal {
 					ld.Elfemitreloc()
@@ -587,7 +710,7 @@ func asmb() {
 			if sym != nil {
 				ld.Lcsize = int32(len(sym.P))
 				for i := 0; int32(i) < ld.Lcsize; i++ {
-					ld.Cput(uint8(sym.P[i]))
+					ld.Cput(sym.P[i])
 				}
 
 				ld.Cflush()
@@ -595,9 +718,8 @@ func asmb() {
 
 		case obj.Hwindows:
 			if ld.Debug['v'] != 0 {
-				fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
+				fmt.Fprintf(ld.Bso, "%5.2f dwarf\n", obj.Cputime())
 			}
-			ld.Dwarfemitdebugsections()
 
 		case obj.Hdarwin:
 			if ld.Linkmode == ld.LinkExternal {
@@ -607,7 +729,7 @@ func asmb() {
 	}
 
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f headr\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f headr\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 	ld.Cseek(0)

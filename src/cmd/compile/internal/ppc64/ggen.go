@@ -12,12 +12,10 @@ import (
 )
 
 func defframe(ptxt *obj.Prog) {
-	var n *gc.Node
-
 	// fill in argument size, stack size
 	ptxt.To.Type = obj.TYPE_TEXTSIZE
 
-	ptxt.To.Val = int32(gc.Rnd(gc.Curfn.Type.Argwid, int64(gc.Widthptr)))
+	ptxt.To.Val = int32(gc.Rnd(gc.Curfn.Type.ArgWidth(), int64(gc.Widthptr)))
 	frame := uint32(gc.Rnd(gc.Stksize+gc.Maxarg, int64(gc.Widthreg)))
 	ptxt.To.Offset = int64(frame)
 
@@ -30,16 +28,15 @@ func defframe(ptxt *obj.Prog) {
 	lo := hi
 
 	// iterate through declarations - they are sorted in decreasing xoffset order.
-	for l := gc.Curfn.Func.Dcl; l != nil; l = l.Next {
-		n = l.N
+	for _, n := range gc.Curfn.Func.Dcl {
 		if !n.Name.Needzero {
 			continue
 		}
 		if n.Class != gc.PAUTO {
-			gc.Fatal("needzero class %d", n.Class)
+			gc.Fatalf("needzero class %d", n.Class)
 		}
 		if n.Type.Width%int64(gc.Widthptr) != 0 || n.Xoffset%int64(gc.Widthptr) != 0 || n.Type.Width == 0 {
-			gc.Fatal("var %v has size %d offset %d", gc.Nconv(n, obj.FmtLong), int(n.Type.Width), int(n.Xoffset))
+			gc.Fatalf("var %v has size %d offset %d", gc.Nconv(n, gc.FmtLong), int(n.Type.Width), int(n.Xoffset))
 		}
 
 		if lo != hi && n.Xoffset+n.Type.Width >= lo-int64(2*gc.Widthreg) {
@@ -69,10 +66,10 @@ func zerorange(p *obj.Prog, frame int64, lo int64, hi int64) *obj.Prog {
 	}
 	if cnt < int64(4*gc.Widthptr) {
 		for i := int64(0); i < cnt; i += int64(gc.Widthptr) {
-			p = appendpp(p, ppc64.AMOVD, obj.TYPE_REG, ppc64.REGZERO, 0, obj.TYPE_MEM, ppc64.REGSP, 8+frame+lo+i)
+			p = appendpp(p, ppc64.AMOVD, obj.TYPE_REG, ppc64.REGZERO, 0, obj.TYPE_MEM, ppc64.REGSP, gc.Ctxt.FixedFrameSize()+frame+lo+i)
 		}
 	} else if cnt <= int64(128*gc.Widthptr) {
-		p = appendpp(p, ppc64.AADD, obj.TYPE_CONST, 0, 8+frame+lo-8, obj.TYPE_REG, ppc64.REGRT1, 0)
+		p = appendpp(p, ppc64.AADD, obj.TYPE_CONST, 0, gc.Ctxt.FixedFrameSize()+frame+lo-8, obj.TYPE_REG, ppc64.REGRT1, 0)
 		p.Reg = ppc64.REGSP
 		p = appendpp(p, obj.ADUFFZERO, obj.TYPE_NONE, 0, 0, obj.TYPE_MEM, 0, 0)
 		f := gc.Sysfunc("duffzero")
@@ -80,7 +77,7 @@ func zerorange(p *obj.Prog, frame int64, lo int64, hi int64) *obj.Prog {
 		gc.Afunclit(&p.To, f)
 		p.To.Offset = 4 * (128 - cnt/int64(gc.Widthptr))
 	} else {
-		p = appendpp(p, ppc64.AMOVD, obj.TYPE_CONST, 0, 8+frame+lo-8, obj.TYPE_REG, ppc64.REGTMP, 0)
+		p = appendpp(p, ppc64.AMOVD, obj.TYPE_CONST, 0, gc.Ctxt.FixedFrameSize()+frame+lo-8, obj.TYPE_REG, ppc64.REGTMP, 0)
 		p = appendpp(p, ppc64.AADD, obj.TYPE_REG, ppc64.REGTMP, 0, obj.TYPE_REG, ppc64.REGRT1, 0)
 		p.Reg = ppc64.REGSP
 		p = appendpp(p, ppc64.AMOVD, obj.TYPE_CONST, 0, cnt, obj.TYPE_REG, ppc64.REGTMP, 0)
@@ -96,15 +93,15 @@ func zerorange(p *obj.Prog, frame int64, lo int64, hi int64) *obj.Prog {
 	return p
 }
 
-func appendpp(p *obj.Prog, as int, ftype int, freg int, foffset int64, ttype int, treg int, toffset int64) *obj.Prog {
+func appendpp(p *obj.Prog, as obj.As, ftype obj.AddrType, freg int, foffset int64, ttype obj.AddrType, treg int, toffset int64) *obj.Prog {
 	q := gc.Ctxt.NewProg()
 	gc.Clearp(q)
-	q.As = int16(as)
+	q.As = as
 	q.Lineno = p.Lineno
-	q.From.Type = int16(ftype)
+	q.From.Type = ftype
 	q.From.Reg = int16(freg)
 	q.From.Offset = foffset
-	q.To.Type = int16(ttype)
+	q.To.Type = ttype
 	q.To.Reg = int16(treg)
 	q.To.Offset = toffset
 	q.Link = p.Link
@@ -127,34 +124,34 @@ var panicdiv *gc.Node
  *	res = nl % nr
  * according to op.
  */
-func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
+func dodiv(op gc.Op, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	// Have to be careful about handling
 	// most negative int divided by -1 correctly.
 	// The hardware will generate undefined result.
 	// Also need to explicitly trap on division on zero,
 	// the hardware will silently generate undefined result.
-	// DIVW will leave unpredicable result in higher 32-bit,
+	// DIVW will leave unpredictable result in higher 32-bit,
 	// so always use DIVD/DIVDU.
 	t := nl.Type
 
 	t0 := t
-	check := 0
-	if gc.Issigned[t.Etype] {
-		check = 1
-		if gc.Isconst(nl, gc.CTINT) && nl.Int() != -(1<<uint64(t.Width*8-1)) {
-			check = 0
-		} else if gc.Isconst(nr, gc.CTINT) && nr.Int() != -1 {
-			check = 0
+	check := false
+	if t.IsSigned() {
+		check = true
+		if gc.Isconst(nl, gc.CTINT) && nl.Int64() != -(1<<uint64(t.Width*8-1)) {
+			check = false
+		} else if gc.Isconst(nr, gc.CTINT) && nr.Int64() != -1 {
+			check = false
 		}
 	}
 
 	if t.Width < 8 {
-		if gc.Issigned[t.Etype] {
+		if t.IsSigned() {
 			t = gc.Types[gc.TINT64]
 		} else {
 			t = gc.Types[gc.TUINT64]
 		}
-		check = 0
+		check = false
 	}
 
 	a := optoas(gc.ODIV, t)
@@ -195,7 +192,7 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	gc.Patch(p1, gc.Pc)
 
 	var p2 *obj.Prog
-	if check != 0 {
+	if check {
 		var nm1 gc.Node
 		gc.Nodconst(&nm1, t, -1)
 		gins(optoas(gc.OCMP, t), &tr, &nm1)
@@ -239,7 +236,7 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	}
 
 	gc.Regfree(&tl)
-	if check != 0 {
+	if check {
 		gc.Patch(p2, gc.Pc)
 	}
 }
@@ -251,13 +248,11 @@ func dodiv(op int, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	// largest ullman on left.
 	if nl.Ullman < nr.Ullman {
-		tmp := (*gc.Node)(nl)
-		nl = nr
-		nr = tmp
+		nl, nr = nr, nl
 	}
 
-	t := (*gc.Type)(nl.Type)
-	w := int(int(t.Width * 8))
+	t := nl.Type
+	w := t.Width * 8
 	var n1 gc.Node
 	gc.Cgenr(nl, &n1, res)
 	var n2 gc.Node
@@ -267,28 +262,28 @@ func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
 		gc.TINT16,
 		gc.TINT32:
 		gins(optoas(gc.OMUL, t), &n2, &n1)
-		p := (*obj.Prog)(gins(ppc64.ASRAD, nil, &n1))
+		p := gins(ppc64.ASRAD, nil, &n1)
 		p.From.Type = obj.TYPE_CONST
-		p.From.Offset = int64(w)
+		p.From.Offset = w
 
 	case gc.TUINT8,
 		gc.TUINT16,
 		gc.TUINT32:
 		gins(optoas(gc.OMUL, t), &n2, &n1)
-		p := (*obj.Prog)(gins(ppc64.ASRD, nil, &n1))
+		p := gins(ppc64.ASRD, nil, &n1)
 		p.From.Type = obj.TYPE_CONST
-		p.From.Offset = int64(w)
+		p.From.Offset = w
 
 	case gc.TINT64,
 		gc.TUINT64:
-		if gc.Issigned[t.Etype] {
+		if t.IsSigned() {
 			gins(ppc64.AMULHD, &n2, &n1)
 		} else {
 			gins(ppc64.AMULHDU, &n2, &n1)
 		}
 
 	default:
-		gc.Fatal("cgen_hmul %v", t)
+		gc.Fatalf("cgen_hmul %v", t)
 	}
 
 	gc.Cgen(&n1, res)
@@ -301,14 +296,14 @@ func cgen_hmul(nl *gc.Node, nr *gc.Node, res *gc.Node) {
  *	res = nl << nr
  *	res = nl >> nr
  */
-func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
-	a := int(optoas(op, nl.Type))
+func cgen_shift(op gc.Op, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
+	a := optoas(op, nl.Type)
 
 	if nr.Op == gc.OLITERAL {
 		var n1 gc.Node
 		gc.Regalloc(&n1, nl.Type, res)
 		gc.Cgen(nl, &n1)
-		sc := uint64(nr.Int())
+		sc := uint64(nr.Int64())
 		if sc >= uint64(nl.Type.Width*8) {
 			// large shift gets 2 shifts by width-1
 			var n3 gc.Node
@@ -371,8 +366,8 @@ func cgen_shift(op int, bounded bool, nl *gc.Node, nr *gc.Node, res *gc.Node) {
 	if !bounded {
 		gc.Nodconst(&n3, tcount, nl.Type.Width*8)
 		gins(optoas(gc.OCMP, tcount), &n1, &n3)
-		p1 := (*obj.Prog)(gc.Gbranch(optoas(gc.OLT, tcount), nil, +1))
-		if op == gc.ORSH && gc.Issigned[nl.Type.Etype] {
+		p1 := gc.Gbranch(optoas(gc.OLT, tcount), nil, +1)
+		if op == gc.ORSH && nl.Type.IsSigned() {
 			gc.Nodconst(&n3, gc.Types[gc.TUINT32], nl.Type.Width*8-1)
 			gins(a, &n3, &n2)
 		} else {
@@ -397,18 +392,18 @@ func clearfat(nl *gc.Node) {
 		fmt.Printf("clearfat %v (%v, size: %d)\n", nl, nl.Type, nl.Type.Width)
 	}
 
-	w := uint64(uint64(nl.Type.Width))
+	w := uint64(nl.Type.Width)
 
 	// Avoid taking the address for simple enough types.
 	if gc.Componentgen(nil, nl) {
 		return
 	}
 
-	c := uint64(w % 8) // bytes
-	q := uint64(w / 8) // dwords
+	c := w % 8 // bytes
+	q := w / 8 // dwords
 
 	if gc.Reginuse(ppc64.REGRT1) {
-		gc.Fatal("%v in use during clearfat", obj.Rconv(ppc64.REGRT1))
+		gc.Fatalf("%v in use during clearfat", obj.Rconv(ppc64.REGRT1))
 	}
 
 	var r0 gc.Node
@@ -433,7 +428,7 @@ func clearfat(nl *gc.Node) {
 		p = gins(ppc64.AMOVDU, &r0, &dst)
 		p.To.Type = obj.TYPE_MEM
 		p.To.Offset = 8
-		pl := (*obj.Prog)(p)
+		pl := p
 
 		p = gins(ppc64.ACMP, &dst, &end)
 		gc.Patch(gc.Gbranch(ppc64.ABNE, nil, 0), pl)
@@ -446,7 +441,7 @@ func clearfat(nl *gc.Node) {
 		p := gins(ppc64.ASUB, nil, &dst)
 		p.From.Type = obj.TYPE_CONST
 		p.From.Offset = 8
-		f := (*gc.Node)(gc.Sysfunc("duffzero"))
+		f := gc.Sysfunc("duffzero")
 		p = gins(obj.ADUFFZERO, nil, f)
 		gc.Afunclit(&p.To, f)
 
@@ -482,7 +477,7 @@ func expandchecks(firstp *obj.Prog) {
 	var p1 *obj.Prog
 	var p2 *obj.Prog
 
-	for p := (*obj.Prog)(firstp); p != nil; p = p.Link {
+	for p := firstp; p != nil; p = p.Link {
 		if gc.Debug_checknil != 0 && gc.Ctxt.Debugvlog != 0 {
 			fmt.Printf("expandchecks: %v\n", p)
 		}
@@ -490,10 +485,10 @@ func expandchecks(firstp *obj.Prog) {
 			continue
 		}
 		if gc.Debug_checknil != 0 && p.Lineno > 1 { // p->lineno==1 in generated wrappers
-			gc.Warnl(int(p.Lineno), "generated nil check")
+			gc.Warnl(p.Lineno, "generated nil check")
 		}
 		if p.From.Type != obj.TYPE_REG {
-			gc.Fatal("invalid nil check %v\n", p)
+			gc.Fatalf("invalid nil check %v\n", p)
 		}
 
 		/*

@@ -6,7 +6,7 @@ package types
 
 import (
 	"go/ast"
-	exact "go/constant" // Renamed to reduce diffs from x/tools.  TODO: remove
+	"go/constant"
 	"go/token"
 )
 
@@ -19,7 +19,7 @@ func (check *Checker) reportAltDecl(obj Object) {
 	}
 }
 
-func (check *Checker) declare(scope *Scope, id *ast.Ident, obj Object) {
+func (check *Checker) declare(scope *Scope, id *ast.Ident, obj Object, pos token.Pos) {
 	// spec: "The blank identifier, represented by the underscore
 	// character _, may be used in a declaration like any other
 	// identifier but the declaration does not introduce a new
@@ -30,6 +30,7 @@ func (check *Checker) declare(scope *Scope, id *ast.Ident, obj Object) {
 			check.reportAltDecl(alt)
 			return
 		}
+		obj.setScopePos(pos)
 	}
 	if id != nil {
 		check.recordDef(id, obj)
@@ -104,7 +105,7 @@ func (check *Checker) constDecl(obj *Const, typ, init ast.Expr) {
 	defer func() { check.iota = nil }()
 
 	// provide valid constant value under all circumstances
-	obj.val = exact.MakeUnknown()
+	obj.val = constant.MakeUnknown()
 
 	// determine type, if any
 	if typ != nil {
@@ -140,6 +141,14 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init ast.Expr) {
 	// determine type, if any
 	if typ != nil {
 		obj.typ = check.typ(typ)
+		// We cannot spread the type to all lhs variables if there
+		// are more than one since that would mark them as checked
+		// (see Checker.objDecl) and the assignment of init exprs,
+		// if any, would not be checked.
+		//
+		// TODO(gri) If we have no init expr, we should distribute
+		// a given type otherwise we need to re-evalate the type
+		// expr for each lhs variable, leading to duplicate work.
 	}
 
 	// check initialization
@@ -155,7 +164,7 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init ast.Expr) {
 		assert(lhs == nil || lhs[0] == obj)
 		var x operand
 		check.expr(&x, init)
-		check.initVar(obj, &x, false)
+		check.initVar(obj, &x, "variable declaration")
 		return
 	}
 
@@ -172,6 +181,17 @@ func (check *Checker) varDecl(obj *Var, lhs []*Var, typ, init ast.Expr) {
 			panic("inconsistent lhs")
 		}
 	}
+
+	// We have multiple variables on the lhs and one init expr.
+	// Make sure all variables have been given the same type if
+	// one was specified, otherwise they assume the type of the
+	// init expression values (was issue #15755).
+	if typ != nil {
+		for _, lhs := range lhs {
+			lhs.typ = obj.typ
+		}
+	}
+
 	check.initVars(lhs, []ast.Expr{init}, token.NoPos)
 }
 
@@ -227,7 +247,7 @@ func (check *Checker) typeDecl(obj *TypeName, typ ast.Expr, def *Named, path []*
 	// TODO(gri) It's easy to create pathological cases where the
 	// current approach is incorrect: In general we need to know
 	// and add all methods _before_ type-checking the type.
-	// See http://play.golang.org/p/WMpE0q2wK8
+	// See https://play.golang.org/p/WMpE0q2wK8
 	check.addMethodDecls(obj)
 }
 
@@ -334,7 +354,7 @@ func (check *Checker) declStmt(decl ast.Decl) {
 					// declare all constants
 					lhs := make([]*Const, len(s.Names))
 					for i, name := range s.Names {
-						obj := NewConst(name.Pos(), pkg, name.Name, nil, exact.MakeInt64(int64(iota)))
+						obj := NewConst(name.Pos(), pkg, name.Name, nil, constant.MakeInt64(int64(iota)))
 						lhs[i] = obj
 
 						var init ast.Expr
@@ -347,8 +367,13 @@ func (check *Checker) declStmt(decl ast.Decl) {
 
 					check.arityMatch(s, last)
 
+					// spec: "The scope of a constant or variable identifier declared
+					// inside a function begins at the end of the ConstSpec or VarSpec
+					// (ShortVarDecl for short variable declarations) and ends at the
+					// end of the innermost containing block."
+					scopePos := s.End()
 					for i, name := range s.Names {
-						check.declare(check.scope, name, lhs[i])
+						check.declare(check.scope, name, lhs[i], scopePos)
 					}
 
 				case token.VAR:
@@ -394,8 +419,10 @@ func (check *Checker) declStmt(decl ast.Decl) {
 
 					// declare all variables
 					// (only at this point are the variable scopes (parents) set)
+					scopePos := s.End() // see constant declarations
 					for i, name := range s.Names {
-						check.declare(check.scope, name, lhs0[i])
+						// see constant declarations
+						check.declare(check.scope, name, lhs0[i], scopePos)
 					}
 
 				default:
@@ -404,7 +431,11 @@ func (check *Checker) declStmt(decl ast.Decl) {
 
 			case *ast.TypeSpec:
 				obj := NewTypeName(s.Name.Pos(), pkg, s.Name.Name, nil)
-				check.declare(check.scope, s.Name, obj)
+				// spec: "The scope of a type identifier declared inside a function
+				// begins at the identifier in the TypeSpec and ends at the end of
+				// the innermost containing block."
+				scopePos := s.Name.Pos()
+				check.declare(check.scope, s.Name, obj, scopePos)
 				check.typeDecl(obj, s.Type, nil, nil)
 
 			default:

@@ -17,7 +17,7 @@ file such as NOTICE, LICENCE or COPYING.
 	Portions Copyright © 2004,2006 Bruce Ellis
 	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+	Portions Copyright © 2009 The Go Authors. All rights reserved.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -172,7 +172,7 @@ func init() {
 	flag.BoolVar(&lflag, "l", false, "disable line directives")
 }
 
-var stacksize = 200
+var initialstacksize = 16
 
 // communication variables between various I/O routines
 var infile string  // input file name
@@ -237,7 +237,6 @@ var defact = make([]int, NSTATES)  // default actions of states
 
 // lookahead set information
 
-var lkst []Lkset
 var nolook = 0  // flag to turn off lookahead computations
 var tbitset = 0 // size of lookahead sets
 var clset Lkset // temporary storage for lookahead computations
@@ -384,7 +383,7 @@ func setup() {
 	if flag.NArg() != 1 {
 		usage()
 	}
-	if stacksize < 1 {
+	if initialstacksize < 1 {
 		// never set so cannot happen
 		fmt.Fprintf(stderr, "yacc: stack size too small\n")
 		usage()
@@ -684,6 +683,10 @@ outer:
 		levprd[nprod] = 0
 	}
 
+	if TEMPSIZE < ntokens+nnonter+1 {
+		errorf("too many tokens (%d) or non-terminals (%d)", ntokens, nnonter)
+	}
+
 	//
 	// end of all rules
 	// dump out the prefix code
@@ -699,25 +702,27 @@ outer:
 		}
 	}
 
-	// put out names of token names
+	// put out names of tokens
 	ftable.WriteRune('\n')
 	fmt.Fprintf(ftable, "var %sToknames = [...]string{\n", prefix)
 	for i := 1; i <= ntokens; i++ {
-		fmt.Fprintf(ftable, "\t\"%v\",\n", tokset[i].name)
+		fmt.Fprintf(ftable, "\t%q,\n", tokset[i].name)
 	}
 	fmt.Fprintf(ftable, "}\n")
 
-	// put out names of state names
+	// put out names of states.
+	// commented out to avoid a huge table just for debugging.
+	// re-enable to have the names in the binary.
 	fmt.Fprintf(ftable, "var %sStatenames = [...]string{", prefix)
 	//	for i:=TOKSTART; i<=ntokens; i++ {
-	//		fmt.Fprintf(ftable, "\t\"%v\",\n", tokset[i].name);
+	//		fmt.Fprintf(ftable, "\t%q,\n", tokset[i].name);
 	//	}
 	fmt.Fprintf(ftable, "}\n")
 
 	ftable.WriteRune('\n')
 	fmt.Fprintf(ftable, "const %sEofCode = 1\n", prefix)
 	fmt.Fprintf(ftable, "const %sErrCode = 2\n", prefix)
-	fmt.Fprintf(ftable, "const %sMaxDepth = %v\n", prefix, stacksize)
+	fmt.Fprintf(ftable, "const %sInitialStackSize = %v\n", prefix, initialstacksize)
 
 	//
 	// copy any postfix code
@@ -1282,8 +1287,9 @@ func dumpprod(curprod []int, max int) {
 func cpyact(curprod []int, max int) {
 
 	if !lflag {
-		fmt.Fprintf(fcode, "\n\t\t//line %v:%v\n\t\t", infile, lineno)
+		fmt.Fprintf(fcode, "\n\t\t//line %v:%v", infile, lineno)
 	}
+	fmt.Fprint(fcode, "\n\t\t")
 
 	lno := lineno
 	brac := 0
@@ -3182,8 +3188,6 @@ func isword(c rune) bool {
 	return c >= 0xa0 || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-func mktemp(t string) string { return t }
-
 //
 // return 1 if 2 arrays are equal
 // return 0 if not equal
@@ -3199,13 +3203,6 @@ func aryeq(a []int, b []int) int {
 		}
 	}
 	return 1
-}
-
-func putrune(f *bufio.Writer, c int) {
-	s := string(c)
-	for i := 0; i < len(s); i++ {
-		f.WriteByte(s[i])
-	}
 }
 
 func getrune(f *bufio.Reader) rune {
@@ -3329,18 +3326,17 @@ type $$Parser interface {
 }
 
 type $$ParserImpl struct {
-	lookahead func() int
+	lval  $$SymType
+	stack [$$InitialStackSize]$$SymType
+	char  int
 }
 
 func (p *$$ParserImpl) Lookahead() int {
-	return p.lookahead()
+	return p.char
 }
 
 func $$NewParser() $$Parser {
-	p := &$$ParserImpl{
-		lookahead: func() int { return -1 },
-	}
-	return p
+	return &$$ParserImpl{}
 }
 
 const $$Flag = -1000
@@ -3468,21 +3464,20 @@ func $$Parse($$lex $$Lexer) int {
 
 func ($$rcvr *$$ParserImpl) Parse($$lex $$Lexer) int {
 	var $$n int
-	var $$lval $$SymType
 	var $$VAL $$SymType
 	var $$Dollar []$$SymType
-	$$S := make([]$$SymType, $$MaxDepth)
+	_ = $$Dollar // silence set and not used
+	$$S := $$rcvr.stack[:]
 
 	Nerrs := 0   /* number of errors */
 	Errflag := 0 /* error recovery flag */
 	$$state := 0
-	$$char := -1
-	$$token := -1 // $$char translated into internal numbering
-	$$rcvr.lookahead = func() int { return $$char }
+	$$rcvr.char = -1
+	$$token := -1 // $$rcvr.char translated into internal numbering
 	defer func() {
 		// Make sure we report no lookahead when not parsing.
 		$$state = -1
-		$$char = -1
+		$$rcvr.char = -1
 		$$token = -1
 	}()
 	$$p := -1
@@ -3514,8 +3509,8 @@ $$newstate:
 	if $$n <= $$Flag {
 		goto $$default /* simple state */
 	}
-	if $$char < 0 {
-		$$char, $$token = $$lex1($$lex, &$$lval)
+	if $$rcvr.char < 0 {
+		$$rcvr.char, $$token = $$lex1($$lex, &$$rcvr.lval)
 	}
 	$$n += $$token
 	if $$n < 0 || $$n >= $$Last {
@@ -3523,9 +3518,9 @@ $$newstate:
 	}
 	$$n = $$Act[$$n]
 	if $$Chk[$$n] == $$token { /* valid shift */
-		$$char = -1
+		$$rcvr.char = -1
 		$$token = -1
-		$$VAL = $$lval
+		$$VAL = $$rcvr.lval
 		$$state = $$n
 		if Errflag > 0 {
 			Errflag--
@@ -3537,8 +3532,8 @@ $$default:
 	/* default state action */
 	$$n = $$Def[$$state]
 	if $$n == -2 {
-		if $$char < 0 {
-			$$char, $$token = $$lex1($$lex, &$$lval)
+		if $$rcvr.char < 0 {
+			$$rcvr.char, $$token = $$lex1($$lex, &$$rcvr.lval)
 		}
 
 		/* look through exception table */
@@ -3601,7 +3596,7 @@ $$default:
 			if $$token == $$EofCode {
 				goto ret1
 			}
-			$$char = -1
+			$$rcvr.char = -1
 			$$token = -1
 			goto $$newstate /* try again in the same state */
 		}

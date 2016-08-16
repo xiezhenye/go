@@ -51,6 +51,18 @@ TEXT runtime·lwp_start(SB),NOSPLIT,$0
 	MOVQ	R13, g_m(DI)
 	MOVQ	DI, g(CX)
 
+	// On DragonFly, a new thread inherits the signal stack of the
+	// creating thread. That confuses minit, so we remove that
+	// signal stack here before calling the regular mstart. It's
+	// a bit baroque to remove a signal stack here only to add one
+	// in minit, but it's a simple change that keeps DragonFly
+	// working like other OS's. At this point all signals are
+	// blocked, so there is no race.
+	SUBQ	$8, SP
+	MOVQ	$0, 0(SP)
+	CALL	runtime·signalstack(SB)
+	ADDQ	$8, SP
+
 	CALL	runtime·stackcheck(SB)
 	CALL	runtime·mstart(SB)
 
@@ -125,9 +137,18 @@ TEXT runtime·raise(SB),NOSPLIT,$16
 	MOVL	$496, AX	// lwp_gettid
 	SYSCALL
 	MOVQ	$-1, DI		// arg 1 - pid
-	MOVQ	8(SP), DI	// arg 2 - tid
-	MOVL	sig+0(FP), SI	// arg 3 - signum
+	MOVQ	AX, SI		// arg 2 - tid
+	MOVL	sig+0(FP), DX	// arg 3 - signum
 	MOVL	$497, AX	// lwp_kill
+	SYSCALL
+	RET
+
+TEXT runtime·raiseproc(SB),NOSPLIT,$0
+	MOVL	$20, AX		// getpid
+	SYSCALL
+	MOVQ	AX, DI		// arg 1 - pid
+	MOVL	sig+0(FP), SI	// arg 2 - signum
+	MOVL	$37, AX		// kill
 	SYSCALL
 	RET
 
@@ -178,37 +199,19 @@ TEXT runtime·sigaction(SB),NOSPLIT,$-8
 	MOVL	$0xf1, 0xf1  // crash
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$64
-	get_tls(BX)
-
-	// check that g exists
-	MOVQ	g(BX), R10
-	CMPQ	R10, $0
-	JNE	5(PC)
-	MOVQ	DI, 0(SP)
-	MOVQ	$runtime·badsignal(SB), AX
+TEXT runtime·sigfwd(SB),NOSPLIT,$0-32
+	MOVL	sig+8(FP), DI
+	MOVQ	info+16(FP), SI
+	MOVQ	ctx+24(FP), DX
+	MOVQ	fn+0(FP), AX
 	CALL	AX
 	RET
 
-	// save g
-	MOVQ	R10, 40(SP)
-	
-	// g = m->signal
-	MOVQ	g_m(R10), AX
-	MOVQ	m_gsignal(AX), AX
-	MOVQ	AX, g(BX)
-	
+TEXT runtime·sigtramp(SB),NOSPLIT,$24
 	MOVQ	DI, 0(SP)
 	MOVQ	SI, 8(SP)
 	MOVQ	DX, 16(SP)
-	MOVQ	R10, 24(SP)
-
-	CALL	runtime·sighandler(SB)
-
-	// restore g
-	get_tls(BX)
-	MOVQ	40(SP), R10
-	MOVQ	R10, g(BX)
+	CALL	runtime·sigtrampgo(SB)
 	RET
 
 TEXT runtime·mmap(SB),NOSPLIT,$0
@@ -307,9 +310,9 @@ TEXT runtime·osyield(SB),NOSPLIT,$-4
 	RET
 
 TEXT runtime·sigprocmask(SB),NOSPLIT,$0
-	MOVL	$3, DI			// arg 1 - how (SIG_SETMASK)
-	MOVQ	new+0(FP), SI		// arg 2 - set
-	MOVQ	old+8(FP), DX		// arg 3 - oset
+	MOVL	how+0(FP), DI		// arg 1 - how
+	MOVQ	new+8(FP), SI		// arg 2 - set
+	MOVQ	old+16(FP), DX		// arg 3 - oset
 	MOVL	$340, AX		// sys_sigprocmask
 	SYSCALL
 	JAE	2(PC)

@@ -3,12 +3,17 @@
 // license that can be found in the LICENSE file.
 
 // Package url parses URLs and implements query escaping.
-// See RFC 3986.
 package url
+
+// See RFC 3986. This package generally follows RFC 3986, except where
+// it deviates for compatibility reasons. When sending changes, first
+// search old issues for history on decisions. Unit tests should also
+// contain references to issue numbers with details.
 
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +27,24 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return e.Op + " " + e.URL + ": " + e.Err.Error() }
+
+type timeout interface {
+	Timeout() bool
+}
+
+func (e *Error) Timeout() bool {
+	t, ok := e.Err.(timeout)
+	return ok && t.Timeout()
+}
+
+type temporary interface {
+	Temporary() bool
+}
+
+func (e *Error) Temporary() bool {
+	t, ok := e.Err.(temporary)
+	return ok && t.Temporary()
+}
 
 func ishex(c byte) bool {
 	switch {
@@ -52,6 +75,7 @@ type encoding int
 const (
 	encodePath encoding = 1 + iota
 	encodeHost
+	encodeZone
 	encodeUserPassword
 	encodeQueryComponent
 	encodeFragment
@@ -63,6 +87,12 @@ func (e EscapeError) Error() string {
 	return "invalid URL escape " + strconv.Quote(string(e))
 }
 
+type InvalidHostError string
+
+func (e InvalidHostError) Error() string {
+	return "invalid character " + strconv.Quote(string(e)) + " in host name"
+}
+
 // Return true if the specified character should be escaped when
 // appearing in a URL string, according to RFC 3986.
 //
@@ -72,6 +102,22 @@ func shouldEscape(c byte, mode encoding) bool {
 	// §2.3 Unreserved characters (alphanum)
 	if 'A' <= c && c <= 'Z' || 'a' <= c && c <= 'z' || '0' <= c && c <= '9' {
 		return false
+	}
+
+	if mode == encodeHost || mode == encodeZone {
+		// §3.2.2 Host allows
+		//	sub-delims = "!" / "$" / "&" / "'" / "(" / ")" / "*" / "+" / "," / ";" / "="
+		// as part of reg-name.
+		// We add : because we include :port as part of host.
+		// We add [ ] because we include [ipv6]:port as part of host.
+		// We add < > because they're the only characters left that
+		// we could possibly allow, and Parse will reject them if we
+		// escape them (because hosts can't use %-encoding for
+		// ASCII bytes).
+		switch c {
+		case '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '[', ']', '<', '>', '"':
+			return false
+		}
 	}
 
 	switch c {
@@ -96,10 +142,6 @@ func shouldEscape(c byte, mode encoding) bool {
 			// that too.
 			return c == '@' || c == '/' || c == '?' || c == ':'
 
-		case encodeHost: // §3.2.1
-			// The RFC allows ':'.
-			return c != ':'
-
 		case encodeQueryComponent: // §3.4
 			// The RFC reserves (so we must escape) everything.
 			return true
@@ -107,13 +149,6 @@ func shouldEscape(c byte, mode encoding) bool {
 		case encodeFragment: // §4.1
 			// The RFC text is silent but the grammar allows
 			// everything, so escape nothing.
-			return false
-		}
-
-	case '[', ']': // §2.2 Reserved characters (reserved)
-		switch mode {
-		case encodeHost: // §3.2.1
-			// The RFC allows '[', ']'.
 			return false
 		}
 	}
@@ -142,15 +177,40 @@ func unescape(s string, mode encoding) (string, error) {
 			if i+2 >= len(s) || !ishex(s[i+1]) || !ishex(s[i+2]) {
 				s = s[i:]
 				if len(s) > 3 {
-					s = s[0:3]
+					s = s[:3]
 				}
 				return "", EscapeError(s)
+			}
+			// Per https://tools.ietf.org/html/rfc3986#page-21
+			// in the host component %-encoding can only be used
+			// for non-ASCII bytes.
+			// But https://tools.ietf.org/html/rfc6874#section-2
+			// introduces %25 being allowed to escape a percent sign
+			// in IPv6 scoped-address literals. Yay.
+			if mode == encodeHost && unhex(s[i+1]) < 8 && s[i:i+3] != "%25" {
+				return "", EscapeError(s[i : i+3])
+			}
+			if mode == encodeZone {
+				// RFC 6874 says basically "anything goes" for zone identifiers
+				// and that even non-ASCII can be redundantly escaped,
+				// but it seems prudent to restrict %-escaped bytes here to those
+				// that are valid host name bytes in their unescaped form.
+				// That is, you can use escaping in the zone identifier but not
+				// to introduce bytes you couldn't just write directly.
+				// But Windows puts spaces here! Yay.
+				v := unhex(s[i+1])<<4 | unhex(s[i+2])
+				if s[i:i+3] != "%25" && v != ' ' && shouldEscape(v, encodeHost) {
+					return "", EscapeError(s[i : i+3])
+				}
 			}
 			i += 3
 		case '+':
 			hasPlus = mode == encodeQueryComponent
 			i++
 		default:
+			if (mode == encodeHost || mode == encodeZone) && s[i] < 0x80 && shouldEscape(s[i], mode) {
+				return "", InvalidHostError(s[i : i+1])
+			}
 			i++
 		}
 	}
@@ -239,18 +299,27 @@ func escape(s string, mode encoding) string {
 // Note that the Path field is stored in decoded form: /%47%6f%2f becomes /Go/.
 // A consequence is that it is impossible to tell which slashes in the Path were
 // slashes in the raw URL and which were %2f. This distinction is rarely important,
-// but when it is a client must use other routines to parse the raw URL or construct
-// the parsed URL. For example, an HTTP server can consult req.RequestURI, and
-// an HTTP client can use URL{Host: "example.com", Opaque: "//example.com/Go%2f"}
-// instead of URL{Host: "example.com", Path: "/Go/"}.
+// but when it is, code must not use Path directly.
+//
+// Go 1.5 introduced the RawPath field to hold the encoded form of Path.
+// The Parse function sets both Path and RawPath in the URL it returns,
+// and URL's String method uses RawPath if it is a valid encoding of Path,
+// by calling the EscapedPath method.
+//
+// In earlier versions of Go, the more indirect workarounds were that an
+// HTTP server could consult req.RequestURI and an HTTP client could
+// construct a URL struct directly and set the Opaque field instead of Path.
+// These still work as well.
 type URL struct {
-	Scheme   string
-	Opaque   string    // encoded opaque data
-	User     *Userinfo // username and password information
-	Host     string    // host or host:port
-	Path     string
-	RawQuery string // encoded query values, without '?'
-	Fragment string // fragment for references, without '#'
+	Scheme     string
+	Opaque     string    // encoded opaque data
+	User       *Userinfo // username and password information
+	Host       string    // host or host:port
+	Path       string
+	RawPath    string // encoded path hint (Go 1.5 and later only; see EscapedPath method)
+	ForceQuery bool   // append a query ('?') even if RawQuery is empty
+	RawQuery   string // encoded query values, without '?'
+	Fragment   string // fragment for references, without '#'
 }
 
 // User returns a Userinfo containing the provided username
@@ -320,7 +389,7 @@ func getscheme(rawurl string) (scheme, path string, err error) {
 			if i == 0 {
 				return "", "", errors.New("missing protocol scheme")
 			}
-			return rawurl[0:i], rawurl[i+1:], nil
+			return rawurl[:i], rawurl[i+1:], nil
 		default:
 			// we have encountered an invalid character,
 			// so there is no valid scheme
@@ -339,17 +408,18 @@ func split(s string, c string, cutc bool) (string, string) {
 		return s, ""
 	}
 	if cutc {
-		return s[0:i], s[i+len(c):]
+		return s[:i], s[i+len(c):]
 	}
-	return s[0:i], s[i:]
+	return s[:i], s[i:]
 }
 
 // Parse parses rawurl into a URL structure.
 // The rawurl may be relative or absolute.
-func Parse(rawurl string) (url *URL, err error) {
+func Parse(rawurl string) (*URL, error) {
 	// Cut off #frag
 	u, frag := split(rawurl, "#", true)
-	if url, err = parse(u, false); err != nil {
+	url, err := parse(u, false)
+	if err != nil {
 		return nil, err
 	}
 	if frag == "" {
@@ -361,16 +431,16 @@ func Parse(rawurl string) (url *URL, err error) {
 	return url, nil
 }
 
-// ParseRequestURI parses rawurl into a URL structure.  It assumes that
+// ParseRequestURI parses rawurl into a URL structure. It assumes that
 // rawurl was received in an HTTP request, so the rawurl is interpreted
 // only as an absolute URI or an absolute path.
 // The string rawurl is assumed not to have a #fragment suffix.
 // (Web browsers strip #fragment before sending the URL to a web server.)
-func ParseRequestURI(rawurl string) (url *URL, err error) {
+func ParseRequestURI(rawurl string) (*URL, error) {
 	return parse(rawurl, true)
 }
 
-// parse parses a URL from a string in one of two contexts.  If
+// parse parses a URL from a string in one of two contexts. If
 // viaRequest is true, the URL is assumed to have arrived via an HTTP request,
 // in which case only absolute URLs or path-absolute relative URLs are allowed.
 // If viaRequest is false, all forms of relative URLs are allowed.
@@ -395,7 +465,12 @@ func parse(rawurl string, viaRequest bool) (url *URL, err error) {
 	}
 	url.Scheme = strings.ToLower(url.Scheme)
 
-	rest, url.RawQuery = split(rest, "?", true)
+	if strings.HasSuffix(rest, "?") && strings.Count(rest, "?") == 1 {
+		url.ForceQuery = true
+		rest = rest[:len(rest)-1]
+	} else {
+		rest, url.RawQuery = split(rest, "?", true)
+	}
 
 	if !strings.HasPrefix(rest, "/") {
 		if url.Scheme != "" {
@@ -420,6 +495,13 @@ func parse(rawurl string, viaRequest bool) (url *URL, err error) {
 	if url.Path, err = unescape(rest, encodePath); err != nil {
 		goto Error
 	}
+	// RawPath is a hint as to the encoding of Path to use
+	// in url.EscapedPath. If that method already gets the
+	// right answer without RawPath, leave it empty.
+	// This will help make sure that people don't rely on it in general.
+	if url.EscapedPath() != rest && validEncodedPath(rest) {
+		url.RawPath = rest
+	}
 	return url, nil
 
 Error:
@@ -440,7 +522,7 @@ func parseAuthority(authority string) (user *Userinfo, host string, err error) {
 		return nil, host, nil
 	}
 	userinfo := authority[:i]
-	if strings.Index(userinfo, ":") < 0 {
+	if !strings.Contains(userinfo, ":") {
 		if userinfo, err = unescape(userinfo, encodeUserPassword); err != nil {
 			return nil, "", err
 		}
@@ -458,47 +540,114 @@ func parseAuthority(authority string) (user *Userinfo, host string, err error) {
 	return user, host, nil
 }
 
-// parseHost parses host as an authority without user information.
+// parseHost parses host as an authority without user
+// information. That is, as host[:port].
 func parseHost(host string) (string, error) {
-	litOrName := host
 	if strings.HasPrefix(host, "[") {
 		// Parse an IP-Literal in RFC 3986 and RFC 6874.
-		// E.g., "[fe80::1], "[fe80::1%25en0]"
-		//
-		// RFC 4007 defines "%" as a delimiter character in
-		// the textual representation of IPv6 addresses.
-		// Per RFC 6874, in URIs that "%" is encoded as "%25".
-		i := strings.LastIndex(host[1:], "]")
+		// E.g., "[fe80::1]", "[fe80::1%25en0]", "[fe80::1]:80".
+		i := strings.LastIndex(host, "]")
 		if i < 0 {
 			return "", errors.New("missing ']' in host")
 		}
-		// Parse a host subcomponent without a ZoneID in RFC
-		// 6874 because the ZoneID is allowed to use the
-		// percent encoded form.
-		j := strings.Index(host[1:1+i], "%25")
-		if j < 0 {
-			litOrName = host[1 : 1+i]
-		} else {
-			litOrName = host[1 : 1+j]
+		colonPort := host[i+1:]
+		if !validOptionalPort(colonPort) {
+			return "", fmt.Errorf("invalid port %q after host", colonPort)
+		}
+
+		// RFC 6874 defines that %25 (%-encoded percent) introduces
+		// the zone identifier, and the zone identifier can use basically
+		// any %-encoding it likes. That's different from the host, which
+		// can only %-encode non-ASCII bytes.
+		// We do impose some restrictions on the zone, to avoid stupidity
+		// like newlines.
+		zone := strings.Index(host[:i], "%25")
+		if zone >= 0 {
+			host1, err := unescape(host[:zone], encodeHost)
+			if err != nil {
+				return "", err
+			}
+			host2, err := unescape(host[zone:i], encodeZone)
+			if err != nil {
+				return "", err
+			}
+			host3, err := unescape(host[i:], encodeHost)
+			if err != nil {
+				return "", err
+			}
+			return host1 + host2 + host3, nil
 		}
 	}
-	// A URI containing an IP-Literal without a ZoneID or
-	// IPv4address in RFC 3986 and RFC 6847 must not be
-	// percent-encoded.
-	//
-	// A URI containing a DNS registered name in RFC 3986 is
-	// allowed to be percent-encoded, though we don't use it for
-	// now to avoid messing up with the gap between allowed
-	// characters in URI and allowed characters in DNS.
-	// See golang.org/issue/7991.
-	if strings.Contains(litOrName, "%") {
-		return "", errors.New("percent-encoded characters in host")
-	}
+
 	var err error
 	if host, err = unescape(host, encodeHost); err != nil {
 		return "", err
 	}
 	return host, nil
+}
+
+// EscapedPath returns the escaped form of u.Path.
+// In general there are multiple possible escaped forms of any path.
+// EscapedPath returns u.RawPath when it is a valid escaping of u.Path.
+// Otherwise EscapedPath ignores u.RawPath and computes an escaped
+// form on its own.
+// The String and RequestURI methods use EscapedPath to construct
+// their results.
+// In general, code should call EscapedPath instead of
+// reading u.RawPath directly.
+func (u *URL) EscapedPath() string {
+	if u.RawPath != "" && validEncodedPath(u.RawPath) {
+		p, err := unescape(u.RawPath, encodePath)
+		if err == nil && p == u.Path {
+			return u.RawPath
+		}
+	}
+	if u.Path == "*" {
+		return "*" // don't escape (Issue 11202)
+	}
+	return escape(u.Path, encodePath)
+}
+
+// validEncodedPath reports whether s is a valid encoded path.
+// It must not contain any bytes that require escaping during path encoding.
+func validEncodedPath(s string) bool {
+	for i := 0; i < len(s); i++ {
+		// RFC 3986, Appendix A.
+		// pchar = unreserved / pct-encoded / sub-delims / ":" / "@".
+		// shouldEscape is not quite compliant with the RFC,
+		// so we check the sub-delims ourselves and let
+		// shouldEscape handle the others.
+		switch s[i] {
+		case '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', ':', '@':
+			// ok
+		case '[', ']':
+			// ok - not specified in RFC 3986 but left alone by modern browsers
+		case '%':
+			// ok - percent encoded, will decode
+		default:
+			if shouldEscape(s[i], encodePath) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validOptionalPort reports whether port is either an empty string
+// or matches /^:\d*$/
+func validOptionalPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	if port[0] != ':' {
+		return false
+	}
+	for _, b := range port[1:] {
+		if b < '0' || b > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // String reassembles the URL into a valid URL string.
@@ -509,6 +658,7 @@ func parseHost(host string) (string, error) {
 //
 // If u.Opaque is non-empty, String uses the first form;
 // otherwise it uses the second form.
+// To obtain the path, String uses u.EscapedPath().
 //
 // In the second form, the following rules apply:
 //	- if u.Scheme is empty, scheme: is omitted.
@@ -539,12 +689,13 @@ func (u *URL) String() string {
 				buf.WriteString(escape(h, encodeHost))
 			}
 		}
-		if u.Path != "" && u.Path[0] != '/' && u.Host != "" {
+		path := u.EscapedPath()
+		if path != "" && path[0] != '/' && u.Host != "" {
 			buf.WriteByte('/')
 		}
-		buf.WriteString(escape(u.Path, encodePath))
+		buf.WriteString(path)
 	}
-	if u.RawQuery != "" {
+	if u.ForceQuery || u.RawQuery != "" {
 		buf.WriteByte('?')
 		buf.WriteString(u.RawQuery)
 	}
@@ -569,8 +720,8 @@ func (v Values) Get(key string) string {
 	if v == nil {
 		return ""
 	}
-	vs, ok := v[key]
-	if !ok || len(vs) == 0 {
+	vs := v[key]
+	if len(vs) == 0 {
 		return ""
 	}
 	return vs[0]
@@ -598,10 +749,10 @@ func (v Values) Del(key string) {
 // ParseQuery always returns a non-nil map containing all the
 // valid query parameters found; err describes the first decoding error
 // encountered, if any.
-func ParseQuery(query string) (m Values, err error) {
-	m = make(Values)
-	err = parseQuery(m, query)
-	return
+func ParseQuery(query string) (Values, error) {
+	m := make(Values)
+	err := parseQuery(m, query)
+	return m, err
 }
 
 func parseQuery(m Values, query string) (err error) {
@@ -705,8 +856,8 @@ func (u *URL) IsAbs() bool {
 	return u.Scheme != ""
 }
 
-// Parse parses a URL in the context of the receiver.  The provided URL
-// may be relative or absolute.  Parse returns nil, err on parse
+// Parse parses a URL in the context of the receiver. The provided URL
+// may be relative or absolute. Parse returns nil, err on parse
 // failure, otherwise its return value is the same as ResolveReference.
 func (u *URL) Parse(ref string) (*URL, error) {
 	refurl, err := Parse(ref)
@@ -718,7 +869,7 @@ func (u *URL) Parse(ref string) (*URL, error) {
 
 // ResolveReference resolves a URI reference to an absolute URI from
 // an absolute base URI, per RFC 3986 Section 5.2.  The URI reference
-// may be relative or absolute.  ResolveReference always returns a new
+// may be relative or absolute. ResolveReference always returns a new
 // URL instance, even if the returned URL is identical to either the
 // base or reference. If ref is an absolute URL, then ResolveReference
 // ignores base and returns a copy of ref.
@@ -764,7 +915,7 @@ func (u *URL) Query() Values {
 func (u *URL) RequestURI() string {
 	result := u.Opaque
 	if result == "" {
-		result = escape(u.Path, encodePath)
+		result = u.EscapedPath()
 		if result == "" {
 			result = "/"
 		}
@@ -773,7 +924,7 @@ func (u *URL) RequestURI() string {
 			result = u.Scheme + ":" + result
 		}
 	}
-	if u.RawQuery != "" {
+	if u.ForceQuery || u.RawQuery != "" {
 		result += "?" + u.RawQuery
 	}
 	return result

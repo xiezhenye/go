@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -32,15 +32,12 @@ package amd64
 
 import (
 	"cmd/compile/internal/gc"
-	"cmd/internal/obj"
 	"cmd/internal/obj/x86"
 )
 
 const (
 	NREGVAR = 32
 )
-
-var reg [x86.MAXREG]uint8
 
 var regname = []string{
 	".AX",
@@ -109,6 +106,7 @@ const (
 	DI  = 1 << (x86.REG_DI - x86.REG_AX)
 	SI  = 1 << (x86.REG_SI - x86.REG_AX)
 	R15 = 1 << (x86.REG_R15 - x86.REG_AX)
+	X0  = 1 << 16
 )
 
 func RtoB(r int) uint64 {
@@ -122,7 +120,7 @@ func BtoR(b uint64) int {
 	b &= 0xffff
 	if gc.Nacl {
 		b &^= (1<<(x86.REG_BP-x86.REG_AX) | 1<<(x86.REG_R15-x86.REG_AX))
-	} else if obj.Framepointer_enabled != 0 {
+	} else if gc.Ctxt.Framepointer_enabled {
 		// BP is part of the calling convention if framepointer_enabled.
 		b &^= (1 << (x86.REG_BP - x86.REG_AX))
 	}

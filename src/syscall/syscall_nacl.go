@@ -1,4 +1,4 @@
-// Copyright 2013 The Go Authors.  All rights reserved.
+// Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -59,7 +59,7 @@ func clen(n []byte) int {
 const PathMax = 256
 
 // An Errno is an unsigned number describing an error condition.
-// It implements the error interface.  The zero Errno is by convention
+// It implements the error interface. The zero Errno is by convention
 // a non-error, so code to convert from Errno to error should use:
 //	err = nil
 //	if errno != 0 {
@@ -295,6 +295,7 @@ func Getgroups() ([]int, error)         { return []int{1}, nil }
 func Getpagesize() int                  { return 65536 }
 func Getppid() int                      { return 2 }
 func Getpid() int                       { return 3 }
+func Gettimeofday(tv *Timeval) error    { return ENOSYS }
 func Getuid() int                       { return 1 }
 func Kill(pid int, signum Signal) error { return ENOSYS }
 func Sendfile(outfd int, infd int, offset *int64, count int) (written int, err error) {

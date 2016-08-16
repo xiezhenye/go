@@ -42,7 +42,7 @@ type rfc1423Algo struct {
 }
 
 // rfc1423Algos holds a slice of the possible ways to encrypt a PEM
-// block.  The ivSize numbers were taken from the OpenSSL source.
+// block. The ivSize numbers were taken from the OpenSSL source.
 var rfc1423Algos = []rfc1423Algo{{
 	cipher:     PEMCipherDES,
 	name:       "DES-CBC",
@@ -142,6 +142,10 @@ func DecryptPEMBlock(b *pem.Block, password []byte) ([]byte, error) {
 	block, err := ciph.cipherFunc(key)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(b.Bytes)%block.BlockSize() != 0 {
+		return nil, errors.New("x509: encrypted PEM data is not a multiple of the block size")
 	}
 
 	data := make([]byte, len(b.Bytes))

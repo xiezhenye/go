@@ -1,4 +1,4 @@
-// Copyright 2011 The Go Authors.  All rights reserved.
+// Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -143,6 +143,11 @@ func main() {
 		w := NewWalker(context, filepath.Join(build.Default.GOROOT, "src"))
 
 		for _, name := range pkgNames {
+			// Vendored packages do not contribute to our
+			// public API surface.
+			if strings.HasPrefix(name, "vendor/") {
+				continue
+			}
 			// - Package "unsafe" contains special signatures requiring
 			//   extra care when printing them - ignore since it is not
 			//   going to change w/o a language change.
@@ -368,15 +373,6 @@ func (w *Walker) parseFile(dir, file string) (*ast.File, error) {
 	return f, nil
 }
 
-func contains(list []string, s string) bool {
-	for _, t := range list {
-		if t == s {
-			return true
-		}
-	}
-	return false
-}
-
 // The package cache doesn't operate correctly in rare (so far artificial)
 // circumstances (issue 8425). Disable before debugging non-obvious errors
 // from the type-checker.
@@ -428,10 +424,15 @@ func (w *Walker) Import(name string) (*types.Package, error) {
 	}
 	w.imported[name] = &importing
 
+	root := w.root
+	if strings.HasPrefix(name, "golang_org/x/") {
+		root = filepath.Join(root, "vendor")
+	}
+
 	// Determine package files.
-	dir := filepath.Join(w.root, filepath.FromSlash(name))
+	dir := filepath.Join(root, filepath.FromSlash(name))
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-		log.Fatalf("no source in tree for package %q", pkg)
+		log.Fatalf("no source in tree for import %q: %v", name, err)
 	}
 
 	context := w.context
@@ -675,7 +676,14 @@ func (w *Walker) emitObj(obj types.Object) {
 	switch obj := obj.(type) {
 	case *types.Const:
 		w.emitf("const %s %s", obj.Name(), w.typeString(obj.Type()))
-		w.emitf("const %s = %s", obj.Name(), obj.Val())
+		x := obj.Val()
+		short := x.String()
+		exact := x.ExactString()
+		if short == exact {
+			w.emitf("const %s = %s", obj.Name(), short)
+		} else {
+			w.emitf("const %s = %s  // %s", obj.Name(), short, exact)
+		}
 	case *types.Var:
 		w.emitf("var %s %s", obj.Name(), w.typeString(obj.Type()))
 	case *types.TypeName:

@@ -32,7 +32,7 @@ func syscall_setenv_c(k string, v string) {
 		return
 	}
 	arg := [2]unsafe.Pointer{cstring(k), cstring(v)}
-	asmcgocall(unsafe.Pointer(_cgo_setenv), unsafe.Pointer(&arg))
+	asmcgocall(_cgo_setenv, unsafe.Pointer(&arg))
 }
 
 // Update the C environment if cgo is loaded.
@@ -43,12 +43,11 @@ func syscall_unsetenv_c(k string) {
 		return
 	}
 	arg := [1]unsafe.Pointer{cstring(k)}
-	asmcgocall(unsafe.Pointer(_cgo_unsetenv), unsafe.Pointer(&arg))
+	asmcgocall(_cgo_unsetenv, unsafe.Pointer(&arg))
 }
 
 func cstring(s string) unsafe.Pointer {
 	p := make([]byte, len(s)+1)
-	sp := (*_string)(unsafe.Pointer(&s))
-	memmove(unsafe.Pointer(&p[0]), unsafe.Pointer(sp.str), uintptr(len(s)))
+	copy(p, s)
 	return unsafe.Pointer(&p[0])
 }

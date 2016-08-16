@@ -5,6 +5,7 @@
 package net
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -23,12 +24,38 @@ func (e *OpError) isValid() error {
 		return fmt.Errorf("OpError.Net is empty: %v", e)
 	}
 	for _, addr := range []Addr{e.Source, e.Addr} {
-		if addr != nil {
-			switch addr.(type) {
-			case *TCPAddr, *UDPAddr, *IPAddr, *IPNet, *UnixAddr, *pipeAddr, fileAddr:
-			default:
-				return fmt.Errorf("OpError.Source or Addr is unknown type: %T, %v", addr, e)
+		switch addr := addr.(type) {
+		case nil:
+		case *TCPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
 			}
+		case *UDPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *IPAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *IPNet:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *UnixAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case *pipeAddr:
+			if addr == nil {
+				return fmt.Errorf("OpError.Source or Addr is non-nil interface: %#v, %v", addr, e)
+			}
+		case fileAddr:
+			if addr == "" {
+				return fmt.Errorf("OpError.Source or Addr is empty: %#v, %v", addr, e)
+			}
+		default:
+			return fmt.Errorf("OpError.Source or Addr is unknown type: %T, %v", addr, e)
 		}
 	}
 	if e.Err == nil {
@@ -65,9 +92,12 @@ second:
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
+	case *os.PathError: // for Plan 9
+		nestedErr = err.Err
+		goto third
 	}
 	switch nestedErr {
-	case errClosing, errMissingAddress:
+	case errCanceled, errClosing, errMissingAddress, errNoSuitableAddress:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -90,8 +120,10 @@ var dialErrorTests = []struct {
 	{"tcp", "no-such-name:80"},
 	{"tcp", "mh/astro/r70:http"},
 
-	{"tcp", "127.0.0.1:0"},
-	{"udp", "127.0.0.1:0"},
+	{"tcp", JoinHostPort("127.0.0.1", "-1")},
+	{"tcp", JoinHostPort("127.0.0.1", "123456789")},
+	{"udp", JoinHostPort("127.0.0.1", "-1")},
+	{"udp", JoinHostPort("127.0.0.1", "123456789")},
 	{"ip:icmp", "127.0.0.1"},
 
 	{"unix", "/path/to/somewhere"},
@@ -107,7 +139,7 @@ func TestDialError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(ctx context.Context, fn func(context.Context, string) ([]IPAddr, error), host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "dial error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 	sw.Set(socktest.FilterConnect, func(so *socktest.Status) (socktest.AfterFilter, error) {
@@ -119,9 +151,22 @@ func TestDialError(t *testing.T) {
 	for i, tt := range dialErrorTests {
 		c, err := d.Dial(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->%s", i, tt.network, c.LocalAddr(), c.RemoteAddr())
+			t.Errorf("#%d: should fail; %s:%s->%s", i, c.LocalAddr().Network(), c.LocalAddr(), c.RemoteAddr())
 			c.Close()
 			continue
+		}
+		if tt.network == "tcp" || tt.network == "udp" {
+			nerr := err
+			if op, ok := nerr.(*OpError); ok {
+				nerr = op.Err
+			}
+			if sys, ok := nerr.(*os.SyscallError); ok {
+				nerr = sys.Err
+			}
+			if nerr == errOpNotSupported {
+				t.Errorf("#%d: should fail without %v; %s:%s->", i, nerr, tt.network, tt.address)
+				continue
+			}
 		}
 		if c != nil {
 			t.Errorf("Dial returned non-nil interface %T(%v) with err != nil", c, c)
@@ -129,6 +174,87 @@ func TestDialError(t *testing.T) {
 		if err = parseDialError(err); err != nil {
 			t.Errorf("#%d: %v", i, err)
 			continue
+		}
+	}
+}
+
+func TestProtocolDialError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "solaris":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+
+	for _, network := range []string{"tcp", "udp", "ip:4294967296", "unix", "unixpacket", "unixgram"} {
+		var err error
+		switch network {
+		case "tcp":
+			_, err = DialTCP(network, nil, &TCPAddr{Port: 1 << 16})
+		case "udp":
+			_, err = DialUDP(network, nil, &UDPAddr{Port: 1 << 16})
+		case "ip:4294967296":
+			_, err = DialIP(network, nil, nil)
+		case "unix", "unixpacket", "unixgram":
+			_, err = DialUnix(network, nil, &UnixAddr{Name: "//"})
+		}
+		if err == nil {
+			t.Errorf("%s: should fail", network)
+			continue
+		}
+		if err = parseDialError(err); err != nil {
+			t.Errorf("%s: %v", network, err)
+			continue
+		}
+	}
+}
+
+func TestDialAddrError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "plan9":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+	if !supportsIPv4 || !supportsIPv6 {
+		t.Skip("both IPv4 and IPv6 are required")
+	}
+
+	for _, tt := range []struct {
+		network string
+		lit     string
+		addr    *TCPAddr
+	}{
+		{"tcp4", "::1", nil},
+		{"tcp4", "", &TCPAddr{IP: IPv6loopback}},
+		// We don't test the {"tcp6", "byte sequence", nil}
+		// case for now because there is no easy way to
+		// control name resolution.
+		{"tcp6", "", &TCPAddr{IP: IP{0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef}}},
+	} {
+		var err error
+		var c Conn
+		if tt.lit != "" {
+			c, err = Dial(tt.network, JoinHostPort(tt.lit, "0"))
+		} else {
+			c, err = DialTCP(tt.network, nil, tt.addr)
+		}
+		if err == nil {
+			c.Close()
+			t.Errorf("%s %q/%v: should fail", tt.network, tt.lit, tt.addr)
+			continue
+		}
+		if perr := parseDialError(err); perr != nil {
+			t.Error(perr)
+			continue
+		}
+		aerr, ok := err.(*OpError).Err.(*AddrError)
+		if !ok {
+			t.Errorf("%s %q/%v: should be AddrError: %v", tt.network, tt.lit, tt.addr, err)
+			continue
+		}
+		want := tt.lit
+		if tt.lit == "" {
+			want = tt.addr.IP.String()
+		}
+		if aerr.Addr != want {
+			t.Fatalf("%s: got %q; want %q", tt.network, aerr.Addr, want)
 		}
 	}
 }
@@ -143,7 +269,8 @@ var listenErrorTests = []struct {
 	{"tcp", "no-such-name:80"},
 	{"tcp", "mh/astro/r70:http"},
 
-	{"tcp", "127.0.0.1:0"},
+	{"tcp", JoinHostPort("127.0.0.1", "-1")},
+	{"tcp", JoinHostPort("127.0.0.1", "123456789")},
 
 	{"unix", "/path/to/somewhere"},
 	{"unixpacket", "/path/to/somewhere"},
@@ -157,7 +284,7 @@ func TestListenError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(_ context.Context, fn func(context.Context, string) ([]IPAddr, error), host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "listen error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 	sw.Set(socktest.FilterListen, func(so *socktest.Status) (socktest.AfterFilter, error) {
@@ -168,9 +295,22 @@ func TestListenError(t *testing.T) {
 	for i, tt := range listenErrorTests {
 		ln, err := Listen(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->", i, tt.network, ln.Addr())
+			t.Errorf("#%d: should fail; %s:%s->", i, ln.Addr().Network(), ln.Addr())
 			ln.Close()
 			continue
+		}
+		if tt.network == "tcp" {
+			nerr := err
+			if op, ok := nerr.(*OpError); ok {
+				nerr = op.Err
+			}
+			if sys, ok := nerr.(*os.SyscallError); ok {
+				nerr = sys.Err
+			}
+			if nerr == errOpNotSupported {
+				t.Errorf("#%d: should fail without %v; %s:%s->", i, nerr, tt.network, tt.address)
+				continue
+			}
 		}
 		if ln != nil {
 			t.Errorf("Listen returned non-nil interface %T(%v) with err != nil", ln, ln)
@@ -191,6 +331,9 @@ var listenPacketErrorTests = []struct {
 	{"udp", "127.0.0.1:☺"},
 	{"udp", "no-such-name:80"},
 	{"udp", "mh/astro/r70:http"},
+
+	{"udp", JoinHostPort("127.0.0.1", "-1")},
+	{"udp", JoinHostPort("127.0.0.1", "123456789")},
 }
 
 func TestListenPacketError(t *testing.T) {
@@ -201,14 +344,14 @@ func TestListenPacketError(t *testing.T) {
 
 	origTestHookLookupIP := testHookLookupIP
 	defer func() { testHookLookupIP = origTestHookLookupIP }()
-	testHookLookupIP = func(fn func(string) ([]IPAddr, error), host string) ([]IPAddr, error) {
+	testHookLookupIP = func(_ context.Context, fn func(context.Context, string) ([]IPAddr, error), host string) ([]IPAddr, error) {
 		return nil, &DNSError{Err: "listen error test", Name: "name", Server: "server", IsTimeout: true}
 	}
 
 	for i, tt := range listenPacketErrorTests {
 		c, err := ListenPacket(tt.network, tt.address)
 		if err == nil {
-			t.Errorf("#%d: should fail; %s:%s->", i, tt.network, c.LocalAddr())
+			t.Errorf("#%d: should fail; %s:%s->", i, c.LocalAddr().Network(), c.LocalAddr())
 			c.Close()
 			continue
 		}
@@ -217,6 +360,37 @@ func TestListenPacketError(t *testing.T) {
 		}
 		if err = parseDialError(err); err != nil {
 			t.Errorf("#%d: %v", i, err)
+			continue
+		}
+	}
+}
+
+func TestProtocolListenError(t *testing.T) {
+	switch runtime.GOOS {
+	case "nacl", "plan9":
+		t.Skipf("not supported on %s", runtime.GOOS)
+	}
+
+	for _, network := range []string{"tcp", "udp", "ip:4294967296", "unix", "unixpacket", "unixgram"} {
+		var err error
+		switch network {
+		case "tcp":
+			_, err = ListenTCP(network, &TCPAddr{Port: 1 << 16})
+		case "udp":
+			_, err = ListenUDP(network, &UDPAddr{Port: 1 << 16})
+		case "ip:4294967296":
+			_, err = ListenIP(network, nil)
+		case "unix", "unixpacket":
+			_, err = ListenUnix(network, &UnixAddr{Name: "//"})
+		case "unixgram":
+			_, err = ListenUnixgram(network, &UnixAddr{Name: "//"})
+		}
+		if err == nil {
+			t.Errorf("%s: should fail", network)
+			continue
+		}
+		if err = parseDialError(err); err != nil {
+			t.Errorf("%s: %v", network, err)
 			continue
 		}
 	}
@@ -295,7 +469,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
+	case errCanceled, errClosing, errMissingAddress, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -423,6 +597,9 @@ second:
 	}
 	switch err := nestedErr.(type) {
 	case *os.SyscallError:
+		nestedErr = err.Err
+		goto third
+	case *os.PathError: // for Plan 9
 		nestedErr = err.Err
 		goto third
 	}
@@ -584,4 +761,18 @@ func TestFileError(t *testing.T) {
 		}
 		ln.Close()
 	}
+}
+
+func parseLookupPortError(nestedErr error) error {
+	if nestedErr == nil {
+		return nil
+	}
+
+	switch nestedErr.(type) {
+	case *AddrError, *DNSError:
+		return nil
+	case *os.PathError: // for Plan 9
+		return nil
+	}
+	return fmt.Errorf("unexpected type on 1st nested level: %T", nestedErr)
 }

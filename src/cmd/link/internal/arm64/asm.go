@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -38,10 +38,52 @@ import (
 	"log"
 )
 
-func gentext() {}
+func gentext() {
+	if !ld.DynlinkingGo() {
+		return
+	}
+	addmoduledata := ld.Linklookup(ld.Ctxt, "runtime.addmoduledata", 0)
+	if addmoduledata.Type == obj.STEXT {
+		// we're linking a module containing the runtime -> no need for
+		// an init function
+		return
+	}
+	addmoduledata.Attr |= ld.AttrReachable
+	initfunc := ld.Linklookup(ld.Ctxt, "go.link.addmoduledata", 0)
+	initfunc.Type = obj.STEXT
+	initfunc.Attr |= ld.AttrLocal
+	initfunc.Attr |= ld.AttrReachable
+	o := func(op uint32) {
+		ld.Adduint32(ld.Ctxt, initfunc, op)
+	}
+	// 0000000000000000 <local.dso_init>:
+	// 0:	90000000 	adrp	x0, 0 <runtime.firstmoduledata>
+	// 	0: R_AARCH64_ADR_PREL_PG_HI21	local.moduledata
+	// 4:	91000000 	add	x0, x0, #0x0
+	// 	4: R_AARCH64_ADD_ABS_LO12_NC	local.moduledata
+	o(0x90000000)
+	o(0x91000000)
+	rel := ld.Addrel(initfunc)
+	rel.Off = 0
+	rel.Siz = 8
+	rel.Sym = ld.Ctxt.Moduledata
+	rel.Type = obj.R_ADDRARM64
 
-func adddynrela(rel *ld.LSym, s *ld.LSym, r *ld.Reloc) {
-	log.Fatalf("adddynrela not implemented")
+	// 8:	14000000 	bl	0 <runtime.addmoduledata>
+	// 	8: R_AARCH64_CALL26	runtime.addmoduledata
+	o(0x14000000)
+	rel = ld.Addrel(initfunc)
+	rel.Off = 8
+	rel.Siz = 4
+	rel.Sym = ld.Linklookup(ld.Ctxt, "runtime.addmoduledata", 0)
+	rel.Type = obj.R_CALLARM64 // Really should be R_AARCH64_JUMP26 but doesn't seem to make any difference
+
+	ld.Ctxt.Textp = append(ld.Ctxt.Textp, initfunc)
+	initarray_entry := ld.Linklookup(ld.Ctxt, "go.link.addmoduledatainit", 0)
+	initarray_entry.Attr |= ld.AttrReachable
+	initarray_entry.Attr |= ld.AttrLocal
+	initarray_entry.Type = obj.SINITARR
+	ld.Addaddr(ld.Ctxt, initarray_entry, initfunc)
 }
 
 func adddynrel(s *ld.LSym, r *ld.Reloc) {
@@ -51,7 +93,7 @@ func adddynrel(s *ld.LSym, r *ld.Reloc) {
 func elfreloc1(r *ld.Reloc, sectoff int64) int {
 	ld.Thearch.Vput(uint64(sectoff))
 
-	elfsym := r.Xsym.Elfsym
+	elfsym := r.Xsym.ElfsymForReloc()
 	switch r.Type {
 	default:
 		return -1
@@ -72,6 +114,21 @@ func elfreloc1(r *ld.Reloc, sectoff int64) int {
 		ld.Thearch.Vput(uint64(r.Xadd))
 		ld.Thearch.Vput(uint64(sectoff + 4))
 		ld.Thearch.Vput(ld.R_AARCH64_ADD_ABS_LO12_NC | uint64(elfsym)<<32)
+
+	case obj.R_ARM64_TLS_LE:
+		ld.Thearch.Vput(ld.R_AARCH64_TLSLE_MOVW_TPREL_G0 | uint64(elfsym)<<32)
+
+	case obj.R_ARM64_TLS_IE:
+		ld.Thearch.Vput(ld.R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21 | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC | uint64(elfsym)<<32)
+
+	case obj.R_ARM64_GOTPCREL:
+		ld.Thearch.Vput(ld.R_AARCH64_ADR_GOT_PAGE | uint64(elfsym)<<32)
+		ld.Thearch.Vput(uint64(r.Xadd))
+		ld.Thearch.Vput(uint64(sectoff + 4))
+		ld.Thearch.Vput(ld.R_AARCH64_LD64_GOT_LO12_NC | uint64(elfsym)<<32)
 
 	case obj.R_CALLARM64:
 		if r.Siz != 4 {
@@ -96,7 +153,7 @@ func machoreloc1(r *ld.Reloc, sectoff int64) int {
 	rs := r.Xsym
 
 	// ld64 has a bug handling MACHO_ARM64_RELOC_UNSIGNED with !extern relocation.
-	// see cmd/internal/ld/data.go for details. The workarond is that don't use !extern
+	// see cmd/internal/ld/data.go for details. The workaround is that don't use !extern
 	// UNSIGNED relocation at all.
 	if rs.Type == obj.SHOSTOBJ || r.Type == obj.R_CALLARM64 || r.Type == obj.R_ADDRARM64 || r.Type == obj.R_ADDR {
 		if rs.Dynid < 0 {
@@ -175,6 +232,37 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 		default:
 			return -1
 
+		case obj.R_ARM64_GOTPCREL:
+			var o1, o2 uint32
+			if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
+				o1 = uint32(*val >> 32)
+				o2 = uint32(*val)
+			} else {
+				o1 = uint32(*val)
+				o2 = uint32(*val >> 32)
+			}
+			// Any relocation against a function symbol is redirected to
+			// be against a local symbol instead (see putelfsym in
+			// symtab.go) but unfortunately the system linker was buggy
+			// when confronted with a R_AARCH64_ADR_GOT_PAGE relocation
+			// against a local symbol until May 2015
+			// (https://sourceware.org/bugzilla/show_bug.cgi?id=18270). So
+			// we convert the adrp; ld64 + R_ARM64_GOTPCREL into adrp;
+			// add + R_ADDRARM64.
+			if !(r.Sym.Version != 0 || (r.Sym.Type&obj.SHIDDEN != 0) || r.Sym.Attr.Local()) && r.Sym.Type == obj.STEXT && ld.DynlinkingGo() {
+				if o2&0xffc00000 != 0xf9400000 {
+					ld.Ctxt.Diag("R_ARM64_GOTPCREL against unexpected instruction %x", o2)
+				}
+				o2 = 0x91000000 | (o2 & 0x000003ff)
+				r.Type = obj.R_ADDRARM64
+			}
+			if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
+				*val = int64(o1)<<32 | int64(o2)
+			} else {
+				*val = int64(o2)<<32 | int64(o1)
+			}
+			fallthrough
+
 		case obj.R_ADDRARM64:
 			r.Done = 0
 
@@ -186,15 +274,10 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 				rs = rs.Outer
 			}
 
-			if rs.Type != obj.SHOSTOBJ && rs.Sect == nil {
+			if rs.Type != obj.SHOSTOBJ && rs.Type != obj.SDYNIMPORT && rs.Sect == nil {
 				ld.Diag("missing section for %s", rs.Name)
 			}
 			r.Xsym = rs
-
-			// the first instruction is always at the lower address, this is endian neutral;
-			// but note that o0 and o1 should still use the target endian.
-			o0 := ld.Thelinkarch.ByteOrder.Uint32(s.P[r.Off : r.Off+4])
-			o1 := ld.Thelinkarch.ByteOrder.Uint32(s.P[r.Off+4 : r.Off+8])
 
 			// Note: ld64 currently has a bug that any non-zero addend for BR26 relocation
 			// will make the linking fail because it thinks the code is not PIC even though
@@ -202,6 +285,15 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 			// That is the reason why the next if block is disabled. When the bug in ld64
 			// is fixed, we can enable this block and also enable duff's device in cmd/7g.
 			if false && ld.HEADTYPE == obj.Hdarwin {
+				var o0, o1 uint32
+
+				if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
+					o0 = uint32(*val >> 32)
+					o1 = uint32(*val)
+				} else {
+					o0 = uint32(*val)
+					o1 = uint32(*val >> 32)
+				}
 				// Mach-O wants the addend to be encoded in the instruction
 				// Note that although Mach-O supports ARM64_RELOC_ADDEND, it
 				// can only encode 24-bit of signed addend, but the instructions
@@ -210,23 +302,23 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 				o0 |= (uint32((r.Xadd>>12)&3) << 29) | (uint32((r.Xadd>>12>>2)&0x7ffff) << 5)
 				o1 |= uint32(r.Xadd&0xfff) << 10
 				r.Xadd = 0
-			}
 
-			// when laid out, the instruction order must always be o1, o2.
-			if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
-				*val = int64(o0)<<32 | int64(o1)
-			} else {
-				*val = int64(o1)<<32 | int64(o0)
+				// when laid out, the instruction order must always be o1, o2.
+				if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
+					*val = int64(o0)<<32 | int64(o1)
+				} else {
+					*val = int64(o1)<<32 | int64(o0)
+				}
 			}
 
 			return 0
 
-		case obj.R_CALLARM64:
+		case obj.R_CALLARM64,
+			obj.R_ARM64_TLS_LE,
+			obj.R_ARM64_TLS_IE:
 			r.Done = 0
 			r.Xsym = r.Sym
-			*val = int64(0xfc000000 & uint32(r.Add))
-			r.Xadd = int64((uint32(r.Add) &^ 0xfc000000) * 4)
-			r.Add = 0
+			r.Xadd = r.Add
 			return 0
 		}
 	}
@@ -246,10 +338,15 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 			ld.Diag("program too large, address relocation distance = %d", t)
 		}
 
-		// the first instruction is always at the lower address, this is endian neutral;
-		// but note that o0 and o1 should still use the target endian.
-		o0 := ld.Thelinkarch.ByteOrder.Uint32(s.P[r.Off : r.Off+4])
-		o1 := ld.Thelinkarch.ByteOrder.Uint32(s.P[r.Off+4 : r.Off+8])
+		var o0, o1 uint32
+
+		if ld.Ctxt.Arch.ByteOrder == binary.BigEndian {
+			o0 = uint32(*val >> 32)
+			o1 = uint32(*val)
+		} else {
+			o0 = uint32(*val)
+			o1 = uint32(*val >> 32)
+		}
 
 		o0 |= (uint32((t>>12)&3) << 29) | (uint32((t>>12>>2)&0x7ffff) << 5)
 		o1 |= uint32(t&0xfff) << 10
@@ -262,8 +359,26 @@ func archreloc(r *ld.Reloc, s *ld.LSym, val *int64) int {
 		}
 		return 0
 
+	case obj.R_ARM64_TLS_LE:
+		r.Done = 0
+		if ld.HEADTYPE != obj.Hlinux {
+			ld.Diag("TLS reloc on unsupported OS %s", ld.Headstr(int(ld.HEADTYPE)))
+		}
+		// The TCB is two pointers. This is not documented anywhere, but is
+		// de facto part of the ABI.
+		v := r.Sym.Value + int64(2*ld.SysArch.PtrSize)
+		if v < 0 || v >= 32678 {
+			ld.Diag("TLS offset out of range %d", v)
+		}
+		*val |= v << 5
+		return 0
+
 	case obj.R_CALLARM64:
-		*val = int64((0xfc000000 & uint32(r.Add)) | uint32((ld.Symaddr(r.Sym)+r.Add*4-(s.Value+int64(r.Off)))/4))
+		t := (ld.Symaddr(r.Sym) + r.Add) - (s.Value + int64(r.Off))
+		if t >= 1<<27 || t < -1<<27 {
+			ld.Diag("program too large, call relocation distance = %d", t)
+		}
+		*val |= (t >> 2) & 0x03ffffff
 		return 0
 	}
 
@@ -277,7 +392,7 @@ func archrelocvariant(r *ld.Reloc, s *ld.LSym, t int64) int64 {
 
 func asmb() {
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f asmb\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f asmb\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 
@@ -295,7 +410,7 @@ func asmb() {
 
 	if ld.Segrodata.Filelen > 0 {
 		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f rodatblk\n", obj.Cputime())
+			fmt.Fprintf(ld.Bso, "%5.2f rodatblk\n", obj.Cputime())
 		}
 		ld.Bso.Flush()
 
@@ -304,26 +419,18 @@ func asmb() {
 	}
 
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f datblk\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f datblk\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 
 	ld.Cseek(int64(ld.Segdata.Fileoff))
 	ld.Datblk(int64(ld.Segdata.Vaddr), int64(ld.Segdata.Filelen))
 
+	ld.Cseek(int64(ld.Segdwarf.Fileoff))
+	ld.Dwarfblk(int64(ld.Segdwarf.Vaddr), int64(ld.Segdwarf.Filelen))
+
 	machlink := uint32(0)
 	if ld.HEADTYPE == obj.Hdarwin {
-		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
-		}
-
-		dwarfoff := uint32(ld.Rnd(int64(uint64(ld.HEADR)+ld.Segtext.Length), int64(ld.INITRND)) + ld.Rnd(int64(ld.Segdata.Filelen), int64(ld.INITRND)))
-		ld.Cseek(int64(dwarfoff))
-
-		ld.Segdwarf.Fileoff = uint64(ld.Cpos())
-		ld.Dwarfemitdebugsections()
-		ld.Segdwarf.Filelen = uint64(ld.Cpos()) - ld.Segdwarf.Fileoff
-
 		machlink = uint32(ld.Domacholink())
 	}
 
@@ -335,13 +442,13 @@ func asmb() {
 	if ld.Debug['s'] == 0 {
 		// TODO: rationalize
 		if ld.Debug['v'] != 0 {
-			fmt.Fprintf(&ld.Bso, "%5.2f sym\n", obj.Cputime())
+			fmt.Fprintf(ld.Bso, "%5.2f sym\n", obj.Cputime())
 		}
 		ld.Bso.Flush()
 		switch ld.HEADTYPE {
 		default:
 			if ld.Iself {
-				symo = uint32(ld.Segdata.Fileoff + ld.Segdata.Filelen)
+				symo = uint32(ld.Segdwarf.Fileoff + ld.Segdwarf.Filelen)
 				symo = uint32(ld.Rnd(int64(symo), int64(ld.INITRND)))
 			}
 
@@ -357,16 +464,11 @@ func asmb() {
 		default:
 			if ld.Iself {
 				if ld.Debug['v'] != 0 {
-					fmt.Fprintf(&ld.Bso, "%5.2f elfsym\n", obj.Cputime())
+					fmt.Fprintf(ld.Bso, "%5.2f elfsym\n", obj.Cputime())
 				}
 				ld.Asmelfsym()
 				ld.Cflush()
 				ld.Cwrite(ld.Elfstrdat)
-
-				if ld.Debug['v'] != 0 {
-					fmt.Fprintf(&ld.Bso, "%5.2f dwarf\n", obj.Cputime())
-				}
-				ld.Dwarfemitdebugsections()
 
 				if ld.Linkmode == ld.LinkExternal {
 					ld.Elfemitreloc()
@@ -381,7 +483,7 @@ func asmb() {
 			if sym != nil {
 				ld.Lcsize = int32(len(sym.P))
 				for i := 0; int32(i) < ld.Lcsize; i++ {
-					ld.Cput(uint8(sym.P[i]))
+					ld.Cput(sym.P[i])
 				}
 
 				ld.Cflush()
@@ -396,7 +498,7 @@ func asmb() {
 
 	ld.Ctxt.Cursym = nil
 	if ld.Debug['v'] != 0 {
-		fmt.Fprintf(&ld.Bso, "%5.2f header\n", obj.Cputime())
+		fmt.Fprintf(ld.Bso, "%5.2f header\n", obj.Cputime())
 	}
 	ld.Bso.Flush()
 	ld.Cseek(0)

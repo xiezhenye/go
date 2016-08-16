@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"reflect"
 	"strings"
 	"testing"
@@ -280,7 +281,7 @@ func TestValueError(t *testing.T) {
 	}
 	t4p := &Type4{3}
 	var t4 Type4 // note: not a pointer.
-	if err := encAndDec(t4p, t4); err == nil || strings.Index(err.Error(), "pointer") < 0 {
+	if err := encAndDec(t4p, t4); err == nil || !strings.Contains(err.Error(), "pointer") {
 		t.Error("expected error about pointer; got", err)
 	}
 }
@@ -388,7 +389,7 @@ func TestSingletons(t *testing.T) {
 			t.Errorf("expected error decoding %v: %s", test.in, test.err)
 			continue
 		case err != nil && test.err != "":
-			if strings.Index(err.Error(), test.err) < 0 {
+			if !strings.Contains(err.Error(), test.err) {
 				t.Errorf("wrong error decoding %v: wanted %s, got %v", test.in, test.err, err)
 			}
 			continue
@@ -414,7 +415,7 @@ func TestStructNonStruct(t *testing.T) {
 	var ns NonStruct
 	if err := encAndDec(s, &ns); err == nil {
 		t.Error("should get error for struct/non-struct")
-	} else if strings.Index(err.Error(), "type") < 0 {
+	} else if !strings.Contains(err.Error(), "type") {
 		t.Error("for struct/non-struct expected type error; got", err)
 	}
 	// Now try the other way
@@ -424,7 +425,7 @@ func TestStructNonStruct(t *testing.T) {
 	}
 	if err := encAndDec(ns, &s); err == nil {
 		t.Error("should get error for non-struct/struct")
-	} else if strings.Index(err.Error(), "type") < 0 {
+	} else if !strings.Contains(err.Error(), "type") {
 		t.Error("for non-struct/struct expected type error; got", err)
 	}
 }
@@ -439,8 +440,8 @@ func (this *interfaceIndirectTestT) F() bool {
 	return true
 }
 
-// A version of a bug reported on golang-nuts.  Also tests top-level
-// slice of interfaces.  The issue was registering *T caused T to be
+// A version of a bug reported on golang-nuts. Also tests top-level
+// slice of interfaces. The issue was registering *T caused T to be
 // stored as the concrete type.
 func TestInterfaceIndirect(t *testing.T) {
 	Register(&interfaceIndirectTestT{})
@@ -463,7 +464,7 @@ func TestInterfaceIndirect(t *testing.T) {
 
 // Also, when the ignored object contains an interface value, it may define
 // types. Make sure that skipping the value still defines the types by using
-// the encoder/decoder pair to send a value afterwards.  If an interface
+// the encoder/decoder pair to send a value afterwards. If an interface
 // is sent, its type in the test is always NewType0, so this checks that the
 // encoder and decoder don't skew with respect to type definitions.
 
@@ -527,6 +528,30 @@ func TestDecodeIntoNothing(t *testing.T) {
 	}
 }
 
+func TestIgnoreRecursiveType(t *testing.T) {
+	// It's hard to build a self-contained test for this because
+	// we can't build compatible types in one package with
+	// different items so something is ignored. Here is
+	// some data that represents, according to debug.go:
+	// type definition {
+	//	slice "recursiveSlice" id=106
+	//		elem id=106
+	// }
+	data := []byte{
+		0x1d, 0xff, 0xd3, 0x02, 0x01, 0x01, 0x0e, 0x72,
+		0x65, 0x63, 0x75, 0x72, 0x73, 0x69, 0x76, 0x65,
+		0x53, 0x6c, 0x69, 0x63, 0x65, 0x01, 0xff, 0xd4,
+		0x00, 0x01, 0xff, 0xd4, 0x00, 0x00, 0x07, 0xff,
+		0xd4, 0x00, 0x02, 0x01, 0x00, 0x00,
+	}
+	dec := NewDecoder(bytes.NewReader(data))
+	// Issue 10415: This caused infinite recursion.
+	err := dec.Decode(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Another bug from golang-nuts, involving nested interfaces.
 type Bug0Outer struct {
 	Bug0Field interface{}
@@ -578,10 +603,6 @@ type Bug1Elem struct {
 }
 
 type Bug1StructMap map[string]Bug1Elem
-
-func bug1EncDec(in Bug1StructMap, out *Bug1StructMap) error {
-	return nil
-}
 
 func TestMapBug1(t *testing.T) {
 	in := make(Bug1StructMap)
@@ -811,28 +832,79 @@ func TestPtrToMapOfMap(t *testing.T) {
 
 // A top-level nil pointer generates a panic with a helpful string-valued message.
 func TestTopLevelNilPointer(t *testing.T) {
-	errMsg := topLevelNilPanic(t)
-	if errMsg == "" {
+	var ip *int
+	encodeErr, panicErr := encodeAndRecover(ip)
+	if encodeErr != nil {
+		t.Fatal("error in encode:", encodeErr)
+	}
+	if panicErr == nil {
 		t.Fatal("top-level nil pointer did not panic")
 	}
+	errMsg := panicErr.Error()
 	if !strings.Contains(errMsg, "nil pointer") {
 		t.Fatal("expected nil pointer error, got:", errMsg)
 	}
 }
 
-func topLevelNilPanic(t *testing.T) (panicErr string) {
+func encodeAndRecover(value interface{}) (encodeErr, panicErr error) {
 	defer func() {
 		e := recover()
-		if err, ok := e.(string); ok {
-			panicErr = err
+		if e != nil {
+			switch err := e.(type) {
+			case error:
+				panicErr = err
+			default:
+				panicErr = fmt.Errorf("%v", err)
+			}
 		}
 	}()
-	var ip *int
-	buf := new(bytes.Buffer)
-	if err := NewEncoder(buf).Encode(ip); err != nil {
-		t.Fatal("error in encode:", err)
-	}
+
+	encodeErr = NewEncoder(ioutil.Discard).Encode(value)
 	return
+}
+
+func TestNilPointerPanics(t *testing.T) {
+	var (
+		nilStringPtr      *string
+		intMap            = make(map[int]int)
+		intMapPtr         = &intMap
+		nilIntMapPtr      *map[int]int
+		zero              int
+		nilBoolChannel    chan bool
+		nilBoolChannelPtr *chan bool
+		nilStringSlice    []string
+		stringSlice       = make([]string, 1)
+		nilStringSlicePtr *[]string
+	)
+
+	testCases := []struct {
+		value     interface{}
+		mustPanic bool
+	}{
+		{nilStringPtr, true},
+		{intMap, false},
+		{intMapPtr, false},
+		{nilIntMapPtr, true},
+		{zero, false},
+		{nilStringSlice, false},
+		{stringSlice, false},
+		{nilStringSlicePtr, true},
+		{nilBoolChannel, false},
+		{nilBoolChannelPtr, true},
+	}
+
+	for _, tt := range testCases {
+		_, panicErr := encodeAndRecover(tt.value)
+		if tt.mustPanic {
+			if panicErr == nil {
+				t.Errorf("expected panic with input %#v, did not panic", tt.value)
+			}
+			continue
+		}
+		if panicErr != nil {
+			t.Fatalf("expected no panic with input %#v, got panic=%v", tt.value, panicErr)
+		}
+	}
 }
 
 func TestNilPointerInsideInterface(t *testing.T) {
@@ -889,7 +961,7 @@ func TestMutipleEncodingsOfBadType(t *testing.T) {
 // There was an error check comparing the length of the input with the
 // length of the slice being decoded. It was wrong because the next
 // thing in the input might be a type definition, which would lead to
-// an incorrect length check.  This test reproduces the corner case.
+// an incorrect length check. This test reproduces the corner case.
 
 type Z struct {
 }
@@ -954,7 +1026,7 @@ var badDataTests = []badDataTest{
 	{"0f1000fb285d003316020735ff023a65c5", "interface encoding", nil},
 	{"03fffb0616fffc00f902ff02ff03bf005d02885802a311a8120228022c028ee7", "GobDecoder", nil},
 	// Issue 10491.
-	{"10fe010f020102fe01100001fe010e000016fe010d030102fe010e00010101015801fe01100000000bfe011000f85555555555555555", "length exceeds input size", nil},
+	{"10fe010f020102fe01100001fe010e000016fe010d030102fe010e00010101015801fe01100000000bfe011000f85555555555555555", "exceeds input size", nil},
 }
 
 // TestBadData tests that various problems caused by malformed input

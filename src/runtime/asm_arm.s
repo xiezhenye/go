@@ -31,7 +31,8 @@ TEXT runtime·rt0_go(SB),NOSPLIT,$-4
 	MOVW	R8, g_m(g)
 
 	// create istack out of the OS stack
-	MOVW	$(-8192+104)(R13), R0
+	// (1MB of system stack is available on iOS and Android)
+	MOVW	$(-64*1024+104)(R13), R0
 	MOVW	R0, g_stackguard0(g)
 	MOVW	R0, g_stackguard1(g)
 	MOVW	R0, (g_stack+stack_lo)(g)
@@ -85,7 +86,11 @@ TEXT runtime·breakpoint(SB),NOSPLIT,$0-0
 #ifdef GOOS_nacl
 	WORD	$0xe125be7f	// BKPT 0x5bef, NACL_INSTR_ARM_BREAKPOINT
 #else
+#ifdef GOOS_plan9
+	WORD	$0xD1200070	// undefined instruction used as armv5 breakpoint in Plan 9
+#else
 	WORD	$0xe7f001f0	// undefined instruction that gdb understands is a software breakpoint
+#endif
 #endif
 	RET
 
@@ -148,7 +153,7 @@ TEXT runtime·gogo(SB),NOSPLIT,$-4-4
 
 // func mcall(fn func(*g))
 // Switch to m->g0's stack, call fn(g).
-// Fn must never return.  It should gogo(&g->sched)
+// Fn must never return. It should gogo(&g->sched)
 // to keep running g.
 TEXT runtime·mcall(SB),NOSPLIT,$-4-4
 	// Save caller state in g->sched.
@@ -180,7 +185,7 @@ TEXT runtime·mcall(SB),NOSPLIT,$-4-4
 	RET
 
 // systemstack_switch is a dummy routine that systemstack leaves at the bottom
-// of the G stack.  We need to distinguish the routine that
+// of the G stack. We need to distinguish the routine that
 // lives at the bottom of the G stack from the one that lives
 // at the top of the system stack because the one at the top of
 // the system stack terminates the stack walk (see topofstack()).
@@ -212,9 +217,12 @@ TEXT runtime·systemstack(SB),NOSPLIT,$0-4
 	BL	(R0)
 
 switch:
-	// save our state in g->sched.  Pretend to
+	// save our state in g->sched. Pretend to
 	// be systemstack_switch if the G stack is scanned.
 	MOVW	$runtime·systemstack_switch(SB), R3
+#ifdef GOOS_nacl
+	ADD	$4, R3, R3 // get past nacl-insert bic instruction
+#endif
 	ADD	$4, R3, R3 // get past push {lr}
 	MOVW	R3, (g_sched+gobuf_pc)(g)
 	MOVW	R13, (g_sched+gobuf_sp)(g)
@@ -259,7 +267,6 @@ noswitch:
 
 // Called during function prolog when more stack is needed.
 // R1 frame size
-// R2 arg size
 // R3 prolog's LR
 // NB. we do not save R0 because we've forced 5c to pass all arguments
 // on the stack.
@@ -308,6 +315,23 @@ TEXT runtime·morestack(SB),NOSPLIT,$-4-0
 TEXT runtime·morestack_noctxt(SB),NOSPLIT,$-4-0
 	MOVW	$0, R7
 	B runtime·morestack(SB)
+
+TEXT runtime·stackBarrier(SB),NOSPLIT,$0
+	// We came here via a RET to an overwritten LR.
+	// R0 may be live. Other registers are available.
+
+	// Get the original return PC, g.stkbar[g.stkbarPos].savedLRVal.
+	MOVW	(g_stkbar+slice_array)(g), R4
+	MOVW	g_stkbarPos(g), R5
+	MOVW	$stkbar__size, R6
+	MUL	R5, R6
+	ADD	R4, R6
+	MOVW	stkbar_savedLRVal(R6), R6
+	// Record that this stack barrier was hit.
+	ADD	$1, R5
+	MOVW	R5, g_stkbarPos(g)
+	// Jump to the original return PC.
+	B	(R6)
 
 // reflectcall: call a function with the given argument list
 // func call(argtype *_type, f *FuncVal, arg *byte, argsize, retoffset uint32).
@@ -458,25 +482,14 @@ TEXT gosave<>(SB),NOSPLIT,$0
 	MOVW	R11, (g_sched+gobuf_ctxt)(g)
 	RET
 
-// asmcgocall(void(*fn)(void*), void *arg)
+// func asmcgocall(fn, arg unsafe.Pointer) int32
 // Call fn(arg) on the scheduler stack,
 // aligned appropriately for the gcc ABI.
-// See cgocall.c for more details.
-TEXT	·asmcgocall(SB),NOSPLIT,$0-8
+// See cgocall.go for more details.
+TEXT ·asmcgocall(SB),NOSPLIT,$0-12
 	MOVW	fn+0(FP), R1
 	MOVW	arg+4(FP), R0
-	BL	asmcgocall<>(SB)
-	RET
 
-TEXT ·asmcgocall_errno(SB),NOSPLIT,$0-12
-	MOVW	fn+0(FP), R1
-	MOVW	arg+4(FP), R0
-	BL	asmcgocall<>(SB)
-	MOVW	R0, ret+8(FP)
-	RET
-
-TEXT asmcgocall<>(SB),NOSPLIT,$0-0
-	// fn in R1, arg in R0.
 	MOVW	R13, R2
 	MOVW	g, R4
 
@@ -513,25 +526,29 @@ g0:
 	SUB	R2, R1
 	MOVW	R5, R0
 	MOVW	R1, R13
+
+	MOVW	R0, ret+8(FP)
 	RET
 
-// cgocallback(void (*fn)(void*), void *frame, uintptr framesize)
+// cgocallback(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
 // Turn the fn into a Go func (by taking its address) and call
 // cgocallback_gofunc.
-TEXT runtime·cgocallback(SB),NOSPLIT,$12-12
+TEXT runtime·cgocallback(SB),NOSPLIT,$16-16
 	MOVW	$fn+0(FP), R0
 	MOVW	R0, 4(R13)
 	MOVW	frame+4(FP), R0
 	MOVW	R0, 8(R13)
 	MOVW	framesize+8(FP), R0
 	MOVW	R0, 12(R13)
+	MOVW	ctxt+12(FP), R0
+	MOVW	R0, 16(R13)
 	MOVW	$runtime·cgocallback_gofunc(SB), R0
 	BL	(R0)
 	RET
 
-// cgocallback_gofunc(void (*fn)(void*), void *frame, uintptr framesize)
-// See cgocall.c for more details.
-TEXT	·cgocallback_gofunc(SB),NOSPLIT,$8-12
+// cgocallback_gofunc(void (*fn)(void*), void *frame, uintptr framesize, uintptr ctxt)
+// See cgocall.go for more details.
+TEXT	·cgocallback_gofunc(SB),NOSPLIT,$8-16
 	NO_LOCAL_POINTERS
 	
 	// Load m and g from thread-local storage.
@@ -545,7 +562,13 @@ TEXT	·cgocallback_gofunc(SB),NOSPLIT,$8-12
 	// lots of space, but the linker doesn't know. Hide the call from
 	// the linker analysis by using an indirect call.
 	CMP	$0, g
-	B.NE	havem
+	B.EQ	needm
+
+	MOVW	g_m(g), R8
+	MOVW	R8, savedm-4(SP)
+	B	havem
+
+needm:
 	MOVW	g, savedm-4(SP) // g is zero, so is m.
 	MOVW	$runtime·needm(SB), R0
 	BL	(R0)
@@ -566,8 +589,6 @@ TEXT	·cgocallback_gofunc(SB),NOSPLIT,$8-12
 	MOVW	R13, (g_sched+gobuf_sp)(R3)
 
 havem:
-	MOVW	g_m(g), R8
-	MOVW	R8, savedm-4(SP)
 	// Now there's a valid m, and we're running on its m->g0.
 	// Save current m->g0->sched.sp on stack and then set it to SP.
 	// Save current sp in m->g0->sched.sp in preparation for
@@ -592,12 +613,15 @@ havem:
 	// so that the traceback will seamlessly trace back into
 	// the earlier calls.
 	//
-	// In the new goroutine, -8(SP) and -4(SP) are unused.
+	// In the new goroutine, -4(SP) is unused (where SP refers to
+	// m->curg's SP while we're setting it up, before we've adjusted it).
 	MOVW	m_curg(R8), R0
 	BL	setg<>(SB)
 	MOVW	(g_sched+gobuf_sp)(g), R4 // prepare stack as R4
 	MOVW	(g_sched+gobuf_pc)(g), R5
 	MOVW	R5, -12(R4)
+	MOVW	ctxt+12(FP), R0
+	MOVW	R0, -8(R4)
 	MOVW	$-12(R4), R13
 	BL	runtime·cgocallbackg(SB)
 
@@ -645,14 +669,30 @@ TEXT setg<>(SB),NOSPLIT,$-4-0
 	MOVW	g, R0
 	RET
 
-TEXT runtime·getcallerpc(SB),NOSPLIT,$-4-8
-	MOVW	0(R13), R0
+TEXT runtime·getcallerpc(SB),NOSPLIT,$4-8
+	MOVW	8(R13), R0		// LR saved by caller
+	MOVW	runtime·stackBarrierPC(SB), R1
+	CMP	R0, R1
+	BNE	nobar
+	// Get original return PC.
+	BL	runtime·nextBarrierPC(SB)
+	MOVW	4(R13), R0
+nobar:
 	MOVW	R0, ret+4(FP)
 	RET
 
-TEXT runtime·setcallerpc(SB),NOSPLIT,$-4-8
+TEXT runtime·setcallerpc(SB),NOSPLIT,$4-8
 	MOVW	pc+4(FP), R0
-	MOVW	R0, 0(R13)
+	MOVW	8(R13), R1
+	MOVW	runtime·stackBarrierPC(SB), R2
+	CMP	R1, R2
+	BEQ	setbar
+	MOVW	R0, 8(R13)		// set LR in caller
+	RET
+setbar:
+	// Set the stack barrier return PC.
+	MOVW	R0, 4(R13)
+	BL	runtime·setNextBarrierPC(SB)
 	RET
 
 TEXT runtime·getcallersp(SB),NOSPLIT,$-4-8
@@ -668,50 +708,21 @@ TEXT runtime·abort(SB),NOSPLIT,$-4-0
 	MOVW	$0, R0
 	MOVW	(R0), R1
 
-// bool armcas(int32 *val, int32 old, int32 new)
-// Atomically:
-//	if(*val == old){
-//		*val = new;
-//		return 1;
-//	}else
-//		return 0;
+// armPublicationBarrier is a native store/store barrier for ARMv7+.
+// On earlier ARM revisions, armPublicationBarrier is a no-op.
+// This will not work on SMP ARMv6 machines, if any are in use.
+// To implement publicationBarrier in sys_$GOOS_arm.s using the native
+// instructions, use:
 //
-// To implement runtime·cas in sys_$GOOS_arm.s
-// using the native instructions, use:
+//	TEXT ·publicationBarrier(SB),NOSPLIT,$-4-0
+//		B	runtime·armPublicationBarrier(SB)
 //
-//	TEXT runtime·cas(SB),NOSPLIT,$0
-//		B	runtime·armcas(SB)
-//
-TEXT runtime·armcas(SB),NOSPLIT,$0-13
-	MOVW	valptr+0(FP), R1
-	MOVW	old+4(FP), R2
-	MOVW	new+8(FP), R3
-casl:
-	LDREX	(R1), R0
-	CMP	R0, R2
-	BNE	casfail
-	STREX	R3, (R1), R0
-	CMP	$0, R0
-	BNE	casl
-	MOVW	$1, R0
-	MOVB	R0, ret+12(FP)
+TEXT runtime·armPublicationBarrier(SB),NOSPLIT,$-4-0
+	MOVB	runtime·goarm(SB), R11
+	CMP	$7, R11
+	BLT	2(PC)
+	WORD $0xf57ff05e	// DMB ST
 	RET
-casfail:
-	MOVW	$0, R0
-	MOVB	R0, ret+12(FP)
-	RET
-
-TEXT runtime·casuintptr(SB),NOSPLIT,$0-13
-	B	runtime·cas(SB)
-
-TEXT runtime·atomicloaduintptr(SB),NOSPLIT,$0-8
-	B	runtime·atomicload(SB)
-
-TEXT runtime·atomicloaduint(SB),NOSPLIT,$0-8
-	B	runtime·atomicload(SB)
-
-TEXT runtime·atomicstoreuintptr(SB),NOSPLIT,$0-8
-	B	runtime·atomicstore(SB)
 
 // AES hashing not implemented for ARM
 TEXT runtime·aeshash(SB),NOSPLIT,$-4-0
@@ -744,13 +755,16 @@ TEXT runtime·memhash_varlen(SB),NOSPLIT,$16-12
 	MOVW	R0, ret+8(FP)
 	RET
 
-TEXT runtime·memeq(SB),NOSPLIT,$-4-13
+// memequal(p, q unsafe.Pointer, size uintptr) bool
+TEXT runtime·memequal(SB),NOSPLIT,$-4-13
 	MOVW	a+0(FP), R1
 	MOVW	b+4(FP), R2
 	MOVW	size+8(FP), R3
 	ADD	R1, R3, R6
 	MOVW	$1, R0
 	MOVB	R0, ret+12(FP)
+	CMP	R1, R2
+	RET.EQ
 loop:
 	CMP	R1, R6
 	RET.EQ
@@ -773,7 +787,7 @@ TEXT runtime·memequal_varlen(SB),NOSPLIT,$16-9
 	MOVW	R0, 4(R13)
 	MOVW	R1, 8(R13)
 	MOVW	R2, 12(R13)
-	BL	runtime·memeq(SB)
+	BL	runtime·memequal(SB)
 	MOVB	16(R13), R0
 	MOVB	R0, ret+8(FP)
 	RET
@@ -808,6 +822,8 @@ TEXT bytes·Compare(SB),NOSPLIT,$-4-28
 // On exit:
 // R4, R5, and R6 are clobbered
 TEXT runtime·cmpbody(SB),NOSPLIT,$-4-0
+	CMP	R2, R3
+	BEQ	samebytes
 	CMP 	R0, R1
 	MOVW 	R0, R6
 	MOVW.LT	R1, R6	// R6 is min(R0, R1)
@@ -858,7 +874,7 @@ loop:
 	MOVB	R8, v+16(FP)
 	RET
 
-// TODO: share code with memeq?
+// TODO: share code with memequal?
 TEXT bytes·Equal(SB),NOSPLIT,$0-25
 	MOVW	a_len+4(FP), R1
 	MOVW	b_len+16(FP), R3
@@ -962,7 +978,7 @@ yieldloop:
 // Called from cgo wrappers, this function returns g->m->curg.stack.hi.
 // Must obey the gcc calling convention.
 TEXT _cgo_topofstack(SB),NOSPLIT,$8
-	// R11 and g register are clobbered by load_g.  They are
+	// R11 and g register are clobbered by load_g. They are
 	// callee-save in the gcc calling convention, so save them here.
 	MOVW	R11, saveR11-4(SP)
 	MOVW	g, saveG-8(SP)
@@ -994,4 +1010,44 @@ TEXT runtime·prefetcht2(SB),NOSPLIT,$0-4
 	RET
 
 TEXT runtime·prefetchnta(SB),NOSPLIT,$0-4
+	RET
+
+// x -> x/1000000, x%1000000, called from Go with args, results on stack.
+TEXT runtime·usplit(SB),NOSPLIT,$0-12
+	MOVW	x+0(FP), R0
+	CALL	runtime·usplitR0(SB)
+	MOVW	R0, q+4(FP)
+	MOVW	R1, r+8(FP)
+	RET
+
+// R0, R1 = R0/1000000, R0%1000000
+TEXT runtime·usplitR0(SB),NOSPLIT,$0
+	// magic multiply to avoid software divide without available m.
+	// see output of go tool compile -S for x/1000000.
+	MOVW	R0, R3
+	MOVW	$1125899907, R1
+	MULLU	R1, R0, (R0, R1)
+	MOVW	R0>>18, R0
+	MOVW	$1000000, R1
+	MULU	R0, R1
+	SUB	R1, R3, R1
+	RET
+
+TEXT runtime·sigreturn(SB),NOSPLIT,$0-4
+        RET
+
+#ifndef GOOS_nacl
+// This is called from .init_array and follows the platform, not Go, ABI.
+TEXT runtime·addmoduledata(SB),NOSPLIT,$0-4
+	MOVW	R9, saver9-4(SP) // The access to global variables below implicitly uses R9, which is callee-save
+	MOVW	runtime·lastmoduledatap(SB), R1
+	MOVW	R0, moduledata_next(R1)
+	MOVW	R0, runtime·lastmoduledatap(SB)
+	MOVW	saver9-4(SP), R9
+	RET
+#endif
+
+TEXT ·checkASM(SB),NOSPLIT,$0-1
+	MOVW	$1, R3
+	MOVB	R3, ret+0(FP)
 	RET

@@ -1,4 +1,4 @@
-// Copyright 2010 The Go Authors.  All rights reserved.
+// Copyright 2010 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -20,7 +20,9 @@ package cgo
 #cgo !android,linux LDFLAGS: -lpthread
 #cgo netbsd LDFLAGS: -lpthread
 #cgo openbsd LDFLAGS: -lpthread
-#cgo windows LDFLAGS: -lm -mthreads
+// we must explicitly link msvcrt, because runtime needs ntdll, and ntdll
+// exports some incompatible libc functions. See golang.org/issue/12030.
+#cgo windows LDFLAGS: -lmsvcrt -lm -mthreads
 
 #cgo CFLAGS: -Wall -Werror
 

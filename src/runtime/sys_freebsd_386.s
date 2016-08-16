@@ -25,7 +25,7 @@ TEXT runtime·thr_start(SB),NOSPLIT,$0
 	MOVL	mm+0(FP), AX
 	MOVL	m_g0(AX), BX
 	LEAL	m_tls(AX), BP
-	MOVL	0(BP), DI
+	MOVL	m_id(AX), DI
 	ADDL	$7, DI
 	PUSHAL
 	PUSHL	$32
@@ -112,6 +112,18 @@ TEXT runtime·raise(SB),NOSPLIT,$16
 	INT	$0x80
 	RET
 
+TEXT runtime·raiseproc(SB),NOSPLIT,$16
+	// getpid
+	MOVL	$20, AX
+	INT	$0x80
+	// kill(self, sig)
+	MOVL	AX, 4(SP)
+	MOVL	sig+0(FP), AX
+	MOVL	AX, 8(SP)
+	MOVL	$37, AX
+	INT	$0x80
+	RET
+
 TEXT runtime·mmap(SB),NOSPLIT,$32
 	LEAL addr+0(FP), SI
 	LEAL	4(SP), DI
@@ -195,44 +207,26 @@ TEXT runtime·sigaction(SB),NOSPLIT,$-4
 	MOVL	$0xf1, 0xf1  // crash
 	RET
 
-TEXT runtime·sigtramp(SB),NOSPLIT,$44
-	get_tls(CX)
-
-	// check that g exists
-	MOVL	g(CX), DI
-	CMPL	DI, $0
-	JNE	6(PC)
-	MOVL	signo+0(FP), BX
-	MOVL	BX, 0(SP)
-	MOVL	$runtime·badsignal(SB), AX
+TEXT runtime·sigfwd(SB),NOSPLIT,$12-16
+	MOVL	sig+4(FP), AX
+	MOVL	AX, 0(SP)
+	MOVL	info+8(FP), AX
+	MOVL	AX, 4(SP)
+	MOVL	ctx+12(FP), AX
+	MOVL	AX, 8(SP)
+	MOVL	fn+0(FP), AX
 	CALL	AX
-	JMP 	ret
+	RET
 
-	// save g
-	MOVL	DI, 20(SP)
-	
-	// g = m->gsignal
-	MOVL	g_m(DI), BX
-	MOVL	m_gsignal(BX), BX
-	MOVL	BX, g(CX)
-
-	// copy arguments for call to sighandler
+TEXT runtime·sigtramp(SB),NOSPLIT,$12
 	MOVL	signo+0(FP), BX
 	MOVL	BX, 0(SP)
 	MOVL	info+4(FP), BX
 	MOVL	BX, 4(SP)
 	MOVL	context+8(FP), BX
 	MOVL	BX, 8(SP)
-	MOVL	DI, 12(SP)
+	CALL	runtime·sigtrampgo(SB)
 
-	CALL	runtime·sighandler(SB)
-
-	// restore g
-	get_tls(CX)
-	MOVL	20(SP), BX
-	MOVL	BX, g(CX)
-
-ret:
 	// call sigreturn
 	MOVL	context+8(FP), AX
 	MOVL	$0, 0(SP)	// syscall gap
@@ -355,10 +349,11 @@ TEXT runtime·osyield(SB),NOSPLIT,$-4
 
 TEXT runtime·sigprocmask(SB),NOSPLIT,$16
 	MOVL	$0, 0(SP)		// syscall gap
-	MOVL	$3, 4(SP)		// arg 1 - how (SIG_SETMASK)
-	MOVL	new+0(FP), AX
+	MOVL	how+0(FP), AX		// arg 1 - how
+	MOVL	AX, 4(SP)
+	MOVL	new+4(FP), AX
 	MOVL	AX, 8(SP)		// arg 2 - set
-	MOVL	old+4(FP), AX
+	MOVL	old+8(FP), AX
 	MOVL	AX, 12(SP)		// arg 3 - oset
 	MOVL	$340, AX		// sys_sigprocmask
 	INT	$0x80

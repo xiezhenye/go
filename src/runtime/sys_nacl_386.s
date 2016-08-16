@@ -227,6 +227,9 @@ TEXT runtime·mmap(SB),NOSPLIT,$32
 	LEAL	24(SP), AX
 	MOVL	AX, 20(SP)
 	NACL_SYSCALL(SYS_mmap)
+	CMPL	AX, $-4095
+	JNA	2(PC)
+	NEGL	AX
 	MOVL	AX, ret+24(FP)
 	RET
 
@@ -322,7 +325,7 @@ ret:
 	// Enable exceptions again.
 	NACL_SYSCALL(SYS_exception_clear_flag)
 
-	// NaCl has abidcated its traditional operating system responsibility
+	// NaCl has abdicated its traditional operating system responsibility
 	// and declined to implement 'sigreturn'. Instead the only way to return
 	// to the execution of our program is to restore the registers ourselves.
 	// Unfortunately, that is impossible to do with strict fidelity, because

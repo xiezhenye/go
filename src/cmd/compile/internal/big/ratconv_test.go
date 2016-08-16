@@ -113,6 +113,8 @@ var floatStringTests = []struct {
 	{"1", 0, "1"},
 	{"1", 2, "1.00"},
 	{"-1", 0, "-1"},
+	{"0.05", 1, "0.1"},
+	{"-0.05", 1, "-0.1"},
 	{".25", 2, "0.25"},
 	{".25", 1, "0.3"},
 	{".25", 3, "0.250"},
@@ -135,7 +137,7 @@ func TestFloatString(t *testing.T) {
 	}
 }
 
-// Test inputs to Rat.SetString.  The prefix "long:" causes the test
+// Test inputs to Rat.SetString. The prefix "long:" causes the test
 // to be skipped in --test.short mode.  (The threshold is about 500us.)
 var float64inputs = []string{
 	// Constants plundered from strconv/testfp.txt.

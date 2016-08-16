@@ -1,4 +1,4 @@
-// Copyright 2015 The Go Authors.  All rights reserved.
+// Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -65,35 +65,6 @@ func tokenize(s string) []string {
 		f = append(f, next)
 	}
 	return f
-}
-
-func cutStringAtNUL(s string) string {
-	if i := strings.Index(s, "\x00"); i >= 0 {
-		s = s[:i]
-	}
-	return s
-}
-
-func Access(name string, mode int) int {
-	if mode != 0 {
-		panic("bad access")
-	}
-	_, err := os.Stat(name)
-	if err != nil {
-		return -1
-	}
-	return 0
-}
-
-// strings.Compare, introduced in Go 1.5.
-func stringsCompare(a, b string) int {
-	if a == b {
-		return 0
-	}
-	if a < b {
-		return -1
-	}
-	return +1
 }
 
 var atExitFuncs []func()

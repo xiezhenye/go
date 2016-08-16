@@ -6,15 +6,15 @@ package gc
 
 import (
 	"cmd/internal/obj"
+	"cmd/internal/obj/ppc64"
+	"cmd/internal/sys"
 	"fmt"
 )
 
-/*
- * generate:
- *	res = n;
- * simplifies and calls Thearch.Gmove.
- * if wb is true, need to emit write barriers.
- */
+// generate:
+//	res = n;
+// simplifies and calls Thearch.Gmove.
+// if wb is true, need to emit write barriers.
 func Cgen(n, res *Node) {
 	cgen_wb(n, res, false)
 }
@@ -34,7 +34,7 @@ func cgen_wb(n, res *Node, wb bool) {
 	}
 
 	if res == nil || res.Type == nil {
-		Fatal("cgen: res nil")
+		Fatalf("cgen: res nil")
 	}
 
 	for n.Op == OCONVNOP {
@@ -68,7 +68,7 @@ func cgen_wb(n, res *Node, wb bool) {
 
 	if n.Ullman >= UINF {
 		if n.Op == OINDREG {
-			Fatal("cgen: this is going to miscompile")
+			Fatalf("cgen: this is going to miscompile")
 		}
 		if res.Ullman >= UINF {
 			var n1 Node
@@ -81,7 +81,7 @@ func cgen_wb(n, res *Node, wb bool) {
 
 	if Isfat(n.Type) {
 		if n.Type.Width < 0 {
-			Fatal("forgot to compute width for %v", n.Type)
+			Fatalf("forgot to compute width for %v", n.Type)
 		}
 		sgen_wb(n, res, n.Type.Width, wb)
 		return
@@ -89,7 +89,7 @@ func cgen_wb(n, res *Node, wb bool) {
 
 	if !res.Addable {
 		if n.Ullman > res.Ullman {
-			if Ctxt.Arch.Regsize == 4 && Is64(n.Type) {
+			if Ctxt.Arch.RegSize == 4 && Is64(n.Type) {
 				var n1 Node
 				Tempname(&n1, n.Type)
 				Cgen(n, &n1)
@@ -103,7 +103,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			if n1.Ullman > res.Ullman {
 				Dump("n1", &n1)
 				Dump("res", res)
-				Fatal("loop in cgen")
+				Fatalf("loop in cgen")
 			}
 
 			cgen_wb(&n1, res, wb)
@@ -111,30 +111,29 @@ func cgen_wb(n, res *Node, wb bool) {
 			return
 		}
 
-		var f int
 		if res.Ullman < UINF {
 			if Complexop(n, res) {
 				Complexgen(n, res)
 				return
 			}
 
-			f = 1 // gen thru register
+			f := true // gen through register
 			switch n.Op {
 			case OLITERAL:
 				if Smallintconst(n) {
-					f = 0
+					f = false
 				}
 
 			case OREGISTER:
-				f = 0
+				f = false
 			}
 
-			if !Iscomplex[n.Type.Etype] && Ctxt.Arch.Regsize == 8 && !wb {
+			if !n.Type.IsComplex() && Ctxt.Arch.RegSize == 8 && !wb {
 				a := Thearch.Optoas(OAS, res.Type)
 				var addr obj.Addr
 				if Thearch.Sudoaddable(a, res, &addr) {
 					var p1 *obj.Prog
-					if f != 0 {
+					if f {
 						var n2 Node
 						Regalloc(&n2, res.Type, nil)
 						Cgen(n, &n2)
@@ -153,7 +152,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			}
 		}
 
-		if Ctxt.Arch.Thechar == '8' {
+		if Ctxt.Arch.Family == sys.I386 {
 			// no registers to speak of
 			var n1, n2 Node
 			Tempname(&n1, n.Type)
@@ -176,12 +175,12 @@ func cgen_wb(n, res *Node, wb bool) {
 	// changes if n->left is an escaping local variable.
 	switch n.Op {
 	case OSPTR, OLEN:
-		if Isslice(n.Left.Type) || Istype(n.Left.Type, TSTRING) {
+		if n.Left.Type.IsSlice() || n.Left.Type.IsString() {
 			n.Addable = n.Left.Addable
 		}
 
 	case OCAP:
-		if Isslice(n.Left.Type) {
+		if n.Left.Type.IsSlice() {
 			n.Addable = n.Left.Addable
 		}
 
@@ -190,8 +189,8 @@ func cgen_wb(n, res *Node, wb bool) {
 	}
 
 	if wb {
-		if int(Simtype[res.Type.Etype]) != Tptr {
-			Fatal("cgen_wb of type %v", res.Type)
+		if Simtype[res.Type.Etype] != Tptr {
+			Fatalf("cgen_wb of type %v", res.Type)
 		}
 		if n.Ullman >= UINF {
 			var n1 Node
@@ -205,10 +204,10 @@ func cgen_wb(n, res *Node, wb bool) {
 
 	// Write barrier now handled. Code below this line can ignore wb.
 
-	if Ctxt.Arch.Thechar == '5' { // TODO(rsc): Maybe more often?
+	if Ctxt.Arch.Family == sys.ARM { // TODO(rsc): Maybe more often?
 		// if both are addressable, move
 		if n.Addable && res.Addable {
-			if Is64(n.Type) || Is64(res.Type) || n.Op == OREGISTER || res.Op == OREGISTER || Iscomplex[n.Type.Etype] || Iscomplex[res.Type.Etype] {
+			if Is64(n.Type) || Is64(res.Type) || n.Op == OREGISTER || res.Op == OREGISTER || n.Type.IsComplex() || res.Type.IsComplex() {
 				Thearch.Gmove(n, res)
 			} else {
 				var n1 Node
@@ -248,12 +247,12 @@ func cgen_wb(n, res *Node, wb bool) {
 		return
 	}
 
-	if (Ctxt.Arch.Thechar == '6' || Ctxt.Arch.Thechar == '8') && n.Addable {
+	if Ctxt.Arch.InFamily(sys.AMD64, sys.I386, sys.S390X) && n.Addable {
 		Thearch.Gmove(n, res)
 		return
 	}
 
-	if Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
+	if Ctxt.Arch.InFamily(sys.ARM64, sys.MIPS64, sys.PPC64) {
 		// if both are addressable, move
 		if n.Addable {
 			if n.Op == OREGISTER || res.Op == OREGISTER {
@@ -270,7 +269,7 @@ func cgen_wb(n, res *Node, wb bool) {
 	}
 
 	// if n is sudoaddable generate addr and move
-	if Ctxt.Arch.Thechar == '5' && !Is64(n.Type) && !Is64(res.Type) && !Iscomplex[n.Type.Etype] && !Iscomplex[res.Type.Etype] {
+	if Ctxt.Arch.Family == sys.ARM && !Is64(n.Type) && !Is64(res.Type) && !n.Type.IsComplex() && !res.Type.IsComplex() {
 		a := Thearch.Optoas(OAS, n.Type)
 		var addr obj.Addr
 		if Thearch.Sudoaddable(a, n, &addr) {
@@ -312,7 +311,7 @@ func cgen_wb(n, res *Node, wb bool) {
 	}
 
 	// 64-bit ops are hard on 32-bit machine.
-	if Ctxt.Arch.Regsize == 4 && (Is64(n.Type) || Is64(res.Type) || n.Left != nil && Is64(n.Left.Type)) {
+	if Ctxt.Arch.RegSize == 4 && (Is64(n.Type) || Is64(res.Type) || n.Left != nil && Is64(n.Left.Type)) {
 		switch n.Op {
 		// math goes to cgen64.
 		case OMINUS,
@@ -331,12 +330,12 @@ func cgen_wb(n, res *Node, wb bool) {
 		}
 	}
 
-	if Thearch.Cgen_float != nil && nl != nil && Isfloat[n.Type.Etype] && Isfloat[nl.Type.Etype] {
+	if Thearch.Cgen_float != nil && nl != nil && n.Type.IsFloat() && nl.Type.IsFloat() {
 		Thearch.Cgen_float(n, res)
 		return
 	}
 
-	if !Iscomplex[n.Type.Etype] && Ctxt.Arch.Regsize == 8 {
+	if !n.Type.IsComplex() && Ctxt.Arch.RegSize == 8 {
 		a := Thearch.Optoas(OAS, n.Type)
 		var addr obj.Addr
 		if Thearch.Sudoaddable(a, n, &addr) {
@@ -357,12 +356,12 @@ func cgen_wb(n, res *Node, wb bool) {
 		}
 	}
 
-	var a int
+	var a obj.As
 	switch n.Op {
 	default:
 		Dump("cgen", n)
 		Dump("cgen-res", res)
-		Fatal("cgen: unknown op %v", Nconv(n, obj.FmtShort|obj.FmtSign))
+		Fatalf("cgen: unknown op %v", Nconv(n, FmtShort|FmtSign))
 
 	case OOROR, OANDAND,
 		OEQ, ONE,
@@ -390,24 +389,24 @@ func cgen_wb(n, res *Node, wb bool) {
 		return
 
 	case OMINUS:
-		if Isfloat[nl.Type.Etype] {
+		if nl.Type.IsFloat() {
 			nr = Nodintconst(-1)
-			Convlit(&nr, n.Type)
+			nr = convlit(nr, n.Type)
 			a = Thearch.Optoas(OMUL, nl.Type)
 			goto sbop
 		}
 
-		a := Thearch.Optoas(int(n.Op), nl.Type)
+		a := Thearch.Optoas(n.Op, nl.Type)
 		// unary
 		var n1 Node
 		Regalloc(&n1, nl.Type, res)
 
 		Cgen(nl, &n1)
-		if Ctxt.Arch.Thechar == '5' {
+		if Ctxt.Arch.Family == sys.ARM {
 			var n2 Node
 			Nodconst(&n2, nl.Type, 0)
 			Thearch.Gins(a, &n2, &n1)
-		} else if Ctxt.Arch.Thechar == '7' {
+		} else if Ctxt.Arch.Family == sys.ARM64 {
 			Thearch.Gins(a, &n1, &n1)
 		} else {
 			Thearch.Gins(a, nil, &n1)
@@ -434,15 +433,15 @@ func cgen_wb(n, res *Node, wb bool) {
 		OXOR,
 		OADD,
 		OMUL:
-		if n.Op == OMUL && Thearch.Cgen_bmul != nil && Thearch.Cgen_bmul(int(n.Op), nl, nr, res) {
+		if n.Op == OMUL && Thearch.Cgen_bmul != nil && Thearch.Cgen_bmul(n.Op, nl, nr, res) {
 			break
 		}
-		a = Thearch.Optoas(int(n.Op), nl.Type)
+		a = Thearch.Optoas(n.Op, nl.Type)
 		goto sbop
 
 		// asymmetric binary
 	case OSUB:
-		a = Thearch.Optoas(int(n.Op), nl.Type)
+		a = Thearch.Optoas(n.Op, nl.Type)
 		goto abop
 
 	case OHMUL:
@@ -454,7 +453,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			return
 		}
 
-		if Ctxt.Arch.Thechar == '8' {
+		if Ctxt.Arch.Family == sys.I386 {
 			var n1 Node
 			var n2 Node
 			Tempname(&n2, n.Type)
@@ -467,19 +466,19 @@ func cgen_wb(n, res *Node, wb bool) {
 
 		var n1 Node
 		var n2 Node
-		if Ctxt.Arch.Thechar == '5' {
+		if Ctxt.Arch.Family == sys.ARM {
 			if nl.Addable && !Is64(nl.Type) {
 				Regalloc(&n1, nl.Type, res)
 				Thearch.Gmove(nl, &n1)
 			} else {
-				if n.Type.Width > int64(Widthptr) || Is64(nl.Type) || Isfloat[nl.Type.Etype] {
+				if n.Type.Width > int64(Widthptr) || Is64(nl.Type) || nl.Type.IsFloat() {
 					Tempname(&n1, nl.Type)
 				} else {
 					Regalloc(&n1, nl.Type, res)
 				}
 				Cgen(nl, &n1)
 			}
-			if n.Type.Width > int64(Widthptr) || Is64(n.Type) || Isfloat[n.Type.Etype] {
+			if n.Type.Width > int64(Widthptr) || Is64(n.Type) || n.Type.IsFloat() {
 				Tempname(&n2, n.Type)
 			} else {
 				Regalloc(&n2, n.Type, nil)
@@ -519,8 +518,7 @@ func cgen_wb(n, res *Node, wb bool) {
 	case ODOT,
 		ODOTPTR,
 		OINDEX,
-		OIND,
-		ONAME: // PHEAP or PPARAMREF var
+		OIND:
 		var n1 Node
 		Igen(n, &n1, res)
 
@@ -542,7 +540,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			var n1 Node
 			Regalloc(&n1, Types[Tptr], res)
 			p1 := Thearch.Gins(Thearch.Optoas(OAS, n1.Type), nil, &n1)
-			Datastring(nl.Val.U.(string), &p1.From)
+			Datastring(nl.Val().U.(string), &p1.From)
 			p1.From.Type = obj.TYPE_ADDR
 			Thearch.Gmove(&n1, res)
 			Regfree(&n1)
@@ -556,7 +554,7 @@ func cgen_wb(n, res *Node, wb bool) {
 		Regfree(&n1)
 
 	case OLEN:
-		if Istype(nl.Type, TMAP) || Istype(nl.Type, TCHAN) {
+		if nl.Type.IsMap() || nl.Type.IsChan() {
 			// map and chan have len in the first int-sized word.
 			// a zero pointer means zero length
 			var n1 Node
@@ -580,7 +578,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			break
 		}
 
-		if Istype(nl.Type, TSTRING) || Isslice(nl.Type) {
+		if nl.Type.IsString() || nl.Type.IsSlice() {
 			// both slice and string have len one pointer into the struct.
 			// a zero pointer means zero length
 			var n1 Node
@@ -593,10 +591,10 @@ func cgen_wb(n, res *Node, wb bool) {
 			break
 		}
 
-		Fatal("cgen: OLEN: unknown type %v", Tconv(nl.Type, obj.FmtLong))
+		Fatalf("cgen: OLEN: unknown type %v", Tconv(nl.Type, FmtLong))
 
 	case OCAP:
-		if Istype(nl.Type, TCHAN) {
+		if nl.Type.IsChan() {
 			// chan has cap in the second int-sized word.
 			// a zero pointer means zero length
 			var n1 Node
@@ -621,7 +619,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			break
 		}
 
-		if Isslice(nl.Type) {
+		if nl.Type.IsSlice() {
 			var n1 Node
 			Igen(nl, &n1, res)
 			n1.Type = Types[Simtype[TUINT]]
@@ -631,7 +629,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			break
 		}
 
-		Fatal("cgen: OCAP: unknown type %v", Tconv(nl.Type, obj.FmtLong))
+		Fatalf("cgen: OCAP: unknown type %v", Tconv(nl.Type, FmtLong))
 
 	case OADDR:
 		if n.Bounded { // let race detector avoid nil checks
@@ -655,8 +653,8 @@ func cgen_wb(n, res *Node, wb bool) {
 		cgen_callret(n, res)
 
 	case OMOD, ODIV:
-		if Isfloat[n.Type.Etype] || Thearch.Dodiv == nil {
-			a = Thearch.Optoas(int(n.Op), nl.Type)
+		if n.Type.IsFloat() || Thearch.Dodiv == nil {
+			a = Thearch.Optoas(n.Op, nl.Type)
 			goto abop
 		}
 
@@ -664,7 +662,7 @@ func cgen_wb(n, res *Node, wb bool) {
 			var n1 Node
 			Regalloc(&n1, nl.Type, res)
 			Cgen(nl, &n1)
-			cgen_div(int(n.Op), &n1, nr, res)
+			cgen_div(n.Op, &n1, nr, res)
 			Regfree(&n1)
 		} else {
 			var n2 Node
@@ -675,45 +673,41 @@ func cgen_wb(n, res *Node, wb bool) {
 				n2 = *nr
 			}
 
-			cgen_div(int(n.Op), nl, &n2, res)
+			cgen_div(n.Op, nl, &n2, res)
 			if n2.Op != OLITERAL {
 				Regfree(&n2)
 			}
 		}
 
 	case OLSH, ORSH, OLROT:
-		Thearch.Cgen_shift(int(n.Op), n.Bounded, nl, nr, res)
+		Thearch.Cgen_shift(n.Op, n.Bounded, nl, nr, res)
 	}
 
 	return
 
-	/*
-	 * put simplest on right - we'll generate into left
-	 * and then adjust it using the computation of right.
-	 * constants and variables have the same ullman
-	 * count, so look for constants specially.
-	 *
-	 * an integer constant we can use as an immediate
-	 * is simpler than a variable - we can use the immediate
-	 * in the adjustment instruction directly - so it goes
-	 * on the right.
-	 *
-	 * other constants, like big integers or floating point
-	 * constants, require a mov into a register, so those
-	 * might as well go on the left, so we can reuse that
-	 * register for the computation.
-	 */
+	// put simplest on right - we'll generate into left
+	// and then adjust it using the computation of right.
+	// constants and variables have the same ullman
+	// count, so look for constants specially.
+	//
+	// an integer constant we can use as an immediate
+	// is simpler than a variable - we can use the immediate
+	// in the adjustment instruction directly - so it goes
+	// on the right.
+	//
+	// other constants, like big integers or floating point
+	// constants, require a mov into a register, so those
+	// might as well go on the left, so we can reuse that
+	// register for the computation.
 sbop: // symmetric binary
 	if nl.Ullman < nr.Ullman || (nl.Ullman == nr.Ullman && (Smallintconst(nl) || (nr.Op == OLITERAL && !Smallintconst(nr)))) {
-		r := nl
-		nl = nr
-		nr = r
+		nl, nr = nr, nl
 	}
 
 abop: // asymmetric binary
 	var n1 Node
 	var n2 Node
-	if Ctxt.Arch.Thechar == '8' {
+	if Ctxt.Arch.Family == sys.I386 {
 		// no registers, sigh
 		if Smallintconst(nr) {
 			var n1 Node
@@ -757,14 +751,14 @@ abop: // asymmetric binary
 		Regalloc(&n1, nl.Type, res)
 		Cgen(nl, &n1)
 
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
+		if Smallintconst(nr) && Ctxt.Arch.Family != sys.MIPS64 && Ctxt.Arch.Family != sys.ARM && Ctxt.Arch.Family != sys.ARM64 && Ctxt.Arch.Family != sys.PPC64 { // TODO(rsc): Check opcode for arm
 			n2 = *nr
 		} else {
 			Regalloc(&n2, nr.Type, nil)
 			Cgen(nr, &n2)
 		}
 	} else {
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' { // TODO(rsc): Check opcode for arm
+		if Smallintconst(nr) && Ctxt.Arch.Family != sys.MIPS64 && Ctxt.Arch.Family != sys.ARM && Ctxt.Arch.Family != sys.ARM64 && Ctxt.Arch.Family != sys.PPC64 { // TODO(rsc): Check opcode for arm
 			n2 = *nr
 		} else {
 			Regalloc(&n2, nr.Type, res)
@@ -785,8 +779,13 @@ abop: // asymmetric binary
 var sys_wbptr *Node
 
 func cgen_wbptr(n, res *Node) {
-	if Curfn != nil && Curfn.Func.Nowritebarrier {
-		Yyerror("write barrier prohibited")
+	if Curfn != nil {
+		if Curfn.Func.Pragma&Nowritebarrier != 0 {
+			Yyerror("write barrier prohibited")
+		}
+		if Curfn.Func.WBLineno == 0 {
+			Curfn.Func.WBLineno = lineno
+		}
 	}
 	if Debug_wb > 0 {
 		Warn("write barrier")
@@ -801,7 +800,9 @@ func cgen_wbptr(n, res *Node) {
 		Cgenr(n, &src, nil)
 	}
 
-	wbEnabled := syslook("writeBarrierEnabled", 0)
+	wbVar := syslook("writeBarrier")
+	wbEnabled := NodSym(ODOT, wbVar, wbVar.Type.Field(0).Sym)
+	wbEnabled = typecheck(wbEnabled, Erv)
 	pbr := Thearch.Ginscmp(ONE, Types[TUINT8], wbEnabled, Nodintconst(0), -1)
 	Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), &src, &dst)
 	pjmp := Gbranch(obj.AJMP, nil, 0)
@@ -812,10 +813,7 @@ func cgen_wbptr(n, res *Node) {
 	a := &p.To
 	a.Type = obj.TYPE_MEM
 	a.Reg = int16(Thearch.REGSP)
-	a.Offset = 0
-	if HasLinkRegister() {
-		a.Offset += int64(Widthptr)
-	}
+	a.Offset = Ctxt.FixedFrameSize()
 	p2 := Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), &src, nil)
 	p2.To = p.To
 	p2.To.Offset += int64(Widthptr)
@@ -831,8 +829,13 @@ func cgen_wbptr(n, res *Node) {
 }
 
 func cgen_wbfat(n, res *Node) {
-	if Curfn != nil && Curfn.Func.Nowritebarrier {
-		Yyerror("write barrier prohibited")
+	if Curfn != nil {
+		if Curfn.Func.Pragma&Nowritebarrier != 0 {
+			Yyerror("write barrier prohibited")
+		}
+		if Curfn.Func.WBLineno == 0 {
+			Curfn.Func.WBLineno = lineno
+		}
 	}
 	if Debug_wb > 0 {
 		Warn("write barrier")
@@ -851,10 +854,7 @@ func cgen_wbfat(n, res *Node) {
 	a := &p.To
 	a.Type = obj.TYPE_MEM
 	a.Reg = int16(Thearch.REGSP)
-	a.Offset = 0
-	if HasLinkRegister() {
-		a.Offset += int64(Widthptr)
-	}
+	a.Offset = Ctxt.FixedFrameSize()
 	if needType {
 		a.Offset += int64(Widthptr)
 	}
@@ -876,8 +876,8 @@ func cgen_wbfat(n, res *Node) {
 // cgen_norm moves n1 to res, truncating to expected type if necessary.
 // n1 is a register, and cgen_norm frees it.
 func cgen_norm(n, n1, res *Node) {
-	switch Ctxt.Arch.Thechar {
-	case '6', '8':
+	switch Ctxt.Arch.Family {
+	case sys.AMD64, sys.I386:
 		// We use sized math, so the result is already truncated.
 	default:
 		switch n.Op {
@@ -904,7 +904,7 @@ func Mgen(n *Node, n1 *Node, rg *Node) {
 
 	Tempname(n1, n.Type)
 	Cgen(n, n1)
-	if n.Type.Width <= int64(Widthptr) || Isfloat[n.Type.Etype] {
+	if n.Type.Width <= int64(Widthptr) || n.Type.IsFloat() {
 		n2 := *n1
 		Regalloc(n1, n.Type, rg)
 		Thearch.Gmove(&n2, n1)
@@ -917,18 +917,16 @@ func Mfree(n *Node) {
 	}
 }
 
-/*
- * allocate a register (reusing res if possible) and generate
- *  a = n
- * The caller must call Regfree(a).
- */
+// allocate a register (reusing res if possible) and generate
+//	a = n
+// The caller must call Regfree(a).
 func Cgenr(n *Node, a *Node, res *Node) {
 	if Debug['g'] != 0 {
 		Dump("cgenr-n", n)
 	}
 
 	if Isfat(n.Type) {
-		Fatal("cgenr on fat node")
+		Fatalf("cgenr on fat node")
 	}
 
 	if n.Addable {
@@ -947,7 +945,7 @@ func Cgenr(n *Node, a *Node, res *Node) {
 		OCALLINTER:
 		var n1 Node
 		Igen(n, &n1, res)
-		Regalloc(a, Types[Tptr], &n1)
+		Regalloc(a, n.Type, &n1)
 		Thearch.Gmove(&n1, a)
 		Regfree(&n1)
 
@@ -957,12 +955,10 @@ func Cgenr(n *Node, a *Node, res *Node) {
 	}
 }
 
-/*
- * allocate a register (reusing res if possible) and generate
- * a = &n
- * The caller must call Regfree(a).
- * The generated code checks that the result is not nil.
- */
+// allocate a register (reusing res if possible) and generate
+//	a = &n
+// The caller must call Regfree(a).
+// The generated code checks that the result is not nil.
 func Agenr(n *Node, a *Node, res *Node) {
 	if Debug['g'] != 0 {
 		Dump("\nagenr-n", n)
@@ -981,10 +977,14 @@ func Agenr(n *Node, a *Node, res *Node) {
 
 	case OIND:
 		Cgenr(n.Left, a, res)
-		Cgen_checknil(a)
+		if !n.Left.NonNil {
+			Cgen_checknil(a)
+		} else if Debug_checknil != 0 && n.Lineno > 1 {
+			Warnl(n.Lineno, "removed nil check")
+		}
 
 	case OINDEX:
-		if Ctxt.Arch.Thechar == '5' {
+		if Ctxt.Arch.Family == sys.ARM {
 			var p2 *obj.Prog // to be patched to panicindex.
 			w := uint32(n.Type.Width)
 			bounded := Debug['B'] != 0 || n.Bounded
@@ -1034,11 +1034,11 @@ func Agenr(n *Node, a *Node, res *Node) {
 			// constant index
 			if Isconst(nr, CTINT) {
 				if Isconst(nl, CTSTR) {
-					Fatal("constant string constant index")
+					Fatalf("constant string constant index")
 				}
-				v := uint64(Mpgetfix(nr.Val.U.(*Mpint)))
+				v := uint64(nr.Int64())
 				var n2 Node
-				if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+				if nl.Type.IsSlice() || nl.Type.IsString() {
 					if Debug['B'] == 0 && !n.Bounded {
 						n1 = n3
 						n1.Op = OINDREG
@@ -1072,8 +1072,8 @@ func Agenr(n *Node, a *Node, res *Node) {
 			if Debug['B'] == 0 && !n.Bounded {
 				// check bounds
 				if Isconst(nl, CTSTR) {
-					Nodconst(&n4, Types[TUINT32], int64(len(nl.Val.U.(string))))
-				} else if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+					Nodconst(&n4, Types[TUINT32], int64(len(nl.Val().U.(string))))
+				} else if nl.Type.IsSlice() || nl.Type.IsString() {
 					n1 = n3
 					n1.Op = OINDREG
 					n1.Type = Types[Tptr]
@@ -1081,7 +1081,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 					Regalloc(&n4, Types[TUINT32], nil)
 					Thearch.Gmove(&n1, &n4)
 				} else {
-					Nodconst(&n4, Types[TUINT32], nl.Type.Bound)
+					Nodconst(&n4, Types[TUINT32], nl.Type.NumElem())
 				}
 				p1 := Thearch.Ginscmp(OLT, Types[TUINT32], &n2, &n4, +1)
 				if n4.Op == OREGISTER {
@@ -1097,9 +1097,9 @@ func Agenr(n *Node, a *Node, res *Node) {
 			if Isconst(nl, CTSTR) {
 				Regalloc(&n3, Types[Tptr], res)
 				p1 := Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), nil, &n3)
-				Datastring(nl.Val.U.(string), &p1.From)
+				Datastring(nl.Val().U.(string), &p1.From)
 				p1.From.Type = obj.TYPE_ADDR
-			} else if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+			} else if nl.Type.IsSlice() || nl.Type.IsString() {
 				n1 = n3
 				n1.Op = OINDREG
 				n1.Type = Types[Tptr]
@@ -1131,7 +1131,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 			Regfree(&n2)
 			break
 		}
-		if Ctxt.Arch.Thechar == '8' {
+		if Ctxt.Arch.Family == sys.I386 {
 			var p2 *obj.Prog // to be patched to panicindex.
 			w := uint32(n.Type.Width)
 			bounded := Debug['B'] != 0 || n.Bounded
@@ -1171,7 +1171,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 
 			// For fixed array we really want the pointer in n3.
 			var n2 Node
-			if Isfixedarray(nl.Type) {
+			if nl.Type.IsArray() {
 				Regalloc(&n2, Types[Tptr], &n3)
 				Agen(&n3, &n2)
 				Regfree(&n3)
@@ -1186,10 +1186,10 @@ func Agenr(n *Node, a *Node, res *Node) {
 			// constant index
 			if Isconst(nr, CTINT) {
 				if Isconst(nl, CTSTR) {
-					Fatal("constant string constant index") // front end should handle
+					Fatalf("constant string constant index") // front end should handle
 				}
-				v := uint64(Mpgetfix(nr.Val.U.(*Mpint)))
-				if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+				v := uint64(nr.Int64())
+				if nl.Type.IsSlice() || nl.Type.IsString() {
 					if Debug['B'] == 0 && !n.Bounded {
 						nlen := n3
 						nlen.Type = Types[TUINT32]
@@ -1219,7 +1219,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 			// i is in register n1, extend to 32 bits.
 			t := Types[TUINT32]
 
-			if Issigned[n1.Type.Etype] {
+			if n1.Type.IsSigned() {
 				t = Types[TINT32]
 			}
 
@@ -1233,13 +1233,13 @@ func Agenr(n *Node, a *Node, res *Node) {
 
 				var nlen Node
 				if Isconst(nl, CTSTR) {
-					Nodconst(&nlen, t, int64(len(nl.Val.U.(string))))
-				} else if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+					Nodconst(&nlen, t, int64(len(nl.Val().U.(string))))
+				} else if nl.Type.IsSlice() || nl.Type.IsString() {
 					nlen = n3
 					nlen.Type = t
 					nlen.Xoffset += int64(Array_nel)
 				} else {
-					Nodconst(&nlen, t, nl.Type.Bound)
+					Nodconst(&nlen, t, nl.Type.NumElem())
 				}
 
 				p1 := Thearch.Ginscmp(OLT, t, &n2, &nlen, +1)
@@ -1253,7 +1253,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 			if Isconst(nl, CTSTR) {
 				Regalloc(&n3, Types[Tptr], res)
 				p1 := Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), nil, &n3)
-				Datastring(nl.Val.U.(string), &p1.From)
+				Datastring(nl.Val().U.(string), &p1.From)
 				p1.From.Type = obj.TYPE_ADDR
 				Thearch.Gins(Thearch.Optoas(OADD, n3.Type), &n2, &n3)
 				goto indexdone1
@@ -1262,7 +1262,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 			// Load base pointer in n3.
 			Regalloc(&tmp, Types[Tptr], &n3)
 
-			if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+			if nl.Type.IsSlice() || nl.Type.IsString() {
 				n3.Type = Types[Tptr]
 				n3.Xoffset += int64(Array_array)
 				Thearch.Gmove(&n3, &tmp)
@@ -1308,7 +1308,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 		if nl.Addable {
 			Cgenr(nr, &n1, nil)
 			if !Isconst(nl, CTSTR) {
-				if Isfixedarray(nl.Type) {
+				if nl.Type.IsArray() {
 					Agenr(nl, &n3, res)
 				} else {
 					Igen(nl, &nlen, res)
@@ -1331,7 +1331,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 
 	irad:
 		if !Isconst(nl, CTSTR) {
-			if Isfixedarray(nl.Type) {
+			if nl.Type.IsArray() {
 				Agenr(nl, &n3, res)
 			} else {
 				if !nl.Addable {
@@ -1376,10 +1376,10 @@ func Agenr(n *Node, a *Node, res *Node) {
 	index:
 		if Isconst(nr, CTINT) {
 			if Isconst(nl, CTSTR) {
-				Fatal("constant string constant index") // front end should handle
+				Fatalf("constant string constant index") // front end should handle
 			}
-			v := uint64(Mpgetfix(nr.Val.U.(*Mpint)))
-			if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+			v := uint64(nr.Int64())
+			if nl.Type.IsSlice() || nl.Type.IsString() {
 				if Debug['B'] == 0 && !n.Bounded {
 					p1 := Thearch.Ginscmp(OGT, Types[Simtype[TUINT]], &nlen, Nodintconst(int64(v)), +1)
 					Ginscall(Panicindex, -1)
@@ -1399,7 +1399,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 		// type of the index
 		t := Types[TUINT64]
 
-		if Issigned[n1.Type.Etype] {
+		if n1.Type.IsSigned() {
 			t = Types[TINT64]
 		}
 
@@ -1416,11 +1416,11 @@ func Agenr(n *Node, a *Node, res *Node) {
 				t = Types[TUINT64]
 			}
 			if Isconst(nl, CTSTR) {
-				Nodconst(&nlen, t, int64(len(nl.Val.U.(string))))
-			} else if Isslice(nl.Type) || nl.Type.Etype == TSTRING {
+				Nodconst(&nlen, t, int64(len(nl.Val().U.(string))))
+			} else if nl.Type.IsSlice() || nl.Type.IsString() {
 				// nlen already initialized
 			} else {
-				Nodconst(&nlen, t, nl.Type.Bound)
+				Nodconst(&nlen, t, nl.Type.NumElem())
 			}
 
 			p1 := Thearch.Ginscmp(OLT, t, &n2, &nlen, +1)
@@ -1431,7 +1431,7 @@ func Agenr(n *Node, a *Node, res *Node) {
 		if Isconst(nl, CTSTR) {
 			Regalloc(&n3, Types[Tptr], res)
 			p1 := Thearch.Gins(Thearch.Optoas(OAS, n3.Type), nil, &n3) // XXX was LEAQ!
-			Datastring(nl.Val.U.(string), &p1.From)
+			Datastring(nl.Val().U.(string), &p1.From)
 			p1.From.Type = obj.TYPE_ADDR
 			Thearch.Gins(Thearch.Optoas(OADD, n3.Type), &n2, &n3)
 			goto indexdone
@@ -1476,11 +1476,9 @@ func log2(n uint64) int {
 	return x
 }
 
-/*
- * generate:
- *	res = &n;
- * The generated code checks that the result is not nil.
- */
+// generate:
+//	res = &n;
+// The generated code checks that the result is not nil.
 func Agen(n *Node, res *Node) {
 	if Debug['g'] != 0 {
 		Dump("\nagen-res", res)
@@ -1529,7 +1527,7 @@ func Agen(n *Node, res *Node) {
 
 	if n.Addable {
 		if n.Op == OREGISTER {
-			Fatal("agen OREGISTER")
+			Fatalf("agen OREGISTER")
 		}
 		var n1 Node
 		n1.Op = OADDR
@@ -1546,7 +1544,8 @@ func Agen(n *Node, res *Node) {
 
 	switch n.Op {
 	default:
-		Fatal("agen: unknown op %v", Nconv(n, obj.FmtShort|obj.FmtSign))
+		Dump("bad agen", n)
+		Fatalf("agen: unknown op %v", Nconv(n, FmtShort|FmtSign))
 
 	case OCALLMETH:
 		cgen_callmeth(n, 0)
@@ -1572,27 +1571,13 @@ func Agen(n *Node, res *Node) {
 		Thearch.Gmove(&n1, res)
 		Regfree(&n1)
 
-	case ONAME:
-		// should only get here with names in this func.
-		if n.Funcdepth > 0 && n.Funcdepth != Funcdepth {
-			Dump("bad agen", n)
-			Fatal("agen: bad ONAME funcdepth %d != %d", n.Funcdepth, Funcdepth)
-		}
-
-		// should only get here for heap vars or paramref
-		if n.Class&PHEAP == 0 && n.Class != PPARAMREF {
-			Dump("bad agen", n)
-			Fatal("agen: bad ONAME class %#x", n.Class)
-		}
-
-		Cgen(n.Name.Heapaddr, res)
-		if n.Xoffset != 0 {
-			addOffset(res, n.Xoffset)
-		}
-
 	case OIND:
 		Cgen(nl, res)
-		Cgen_checknil(res)
+		if !nl.NonNil {
+			Cgen_checknil(res)
+		} else if Debug_checknil != 0 && n.Lineno > 1 {
+			Warnl(n.Lineno, "removed nil check")
+		}
 
 	case ODOT:
 		Agen(nl, res)
@@ -1602,7 +1587,11 @@ func Agen(n *Node, res *Node) {
 
 	case ODOTPTR:
 		Cgen(nl, res)
-		Cgen_checknil(res)
+		if !nl.NonNil {
+			Cgen_checknil(res)
+		} else if Debug_checknil != 0 && n.Lineno > 1 {
+			Warnl(n.Lineno, "removed nil check")
+		}
 		if n.Xoffset != 0 {
 			addOffset(res, n.Xoffset)
 		}
@@ -1610,7 +1599,7 @@ func Agen(n *Node, res *Node) {
 }
 
 func addOffset(res *Node, offset int64) {
-	if Ctxt.Arch.Thechar == '6' || Ctxt.Arch.Thechar == '8' {
+	if Ctxt.Arch.InFamily(sys.AMD64, sys.I386) {
 		Thearch.Gins(Thearch.Optoas(OADD, Types[Tptr]), Nodintconst(offset), res)
 		return
 	}
@@ -1639,8 +1628,9 @@ func Igen(n *Node, a *Node, res *Node) {
 
 	switch n.Op {
 	case ONAME:
-		if (n.Class&PHEAP != 0) || n.Class == PPARAMREF {
-			break
+		if n.Class == PAUTOHEAP {
+			Dump("igen", n)
+			Fatalf("bad name")
 		}
 		*a = *n
 		return
@@ -1663,7 +1653,11 @@ func Igen(n *Node, a *Node, res *Node) {
 
 	case ODOTPTR:
 		Cgenr(n.Left, a, res)
-		Cgen_checknil(a)
+		if !n.Left.NonNil {
+			Cgen_checknil(a)
+		} else if Debug_checknil != 0 && n.Lineno > 1 {
+			Warnl(n.Lineno, "removed nil check")
+		}
 		a.Op = OINDREG
 		a.Xoffset += n.Xoffset
 		a.Type = n.Type
@@ -1682,28 +1676,24 @@ func Igen(n *Node, a *Node, res *Node) {
 			cgen_callinter(n, nil, 0)
 		}
 
-		var flist Iter
-		fp := Structfirst(&flist, Getoutarg(n.Left.Type))
+		fp := n.Left.Type.Results().Field(0)
 		*a = Node{}
 		a.Op = OINDREG
 		a.Reg = int16(Thearch.REGSP)
 		a.Addable = true
-		a.Xoffset = fp.Width
-		if HasLinkRegister() {
-			a.Xoffset += int64(Ctxt.Arch.Ptrsize)
-		}
+		a.Xoffset = fp.Offset + Ctxt.FixedFrameSize()
 		a.Type = n.Type
 		return
 
-		// Index of fixed-size array by constant can
-	// put the offset in the addressing.
-	// Could do the same for slice except that we need
-	// to use the real index for the bounds checking.
 	case OINDEX:
-		if Isfixedarray(n.Left.Type) || (Isptr[n.Left.Type.Etype] && Isfixedarray(n.Left.Left.Type)) {
+		// Index of fixed-size array by constant can
+		// put the offset in the addressing.
+		// Could do the same for slice except that we need
+		// to use the real index for the bounds checking.
+		if n.Left.Type.IsArray() || (n.Left.Type.IsPtr() && n.Left.Left.Type.IsArray()) {
 			if Isconst(n.Right, CTINT) {
 				// Compute &a.
-				if !Isptr[n.Left.Type.Etype] {
+				if !n.Left.Type.IsPtr() {
 					Igen(n.Left, a, res)
 				} else {
 					var n1 Node
@@ -1718,7 +1708,7 @@ func Igen(n *Node, a *Node, res *Node) {
 				// Compute &a[i] as &a + i*width.
 				a.Type = n.Type
 
-				a.Xoffset += Mpgetfix(n.Right.Val.U.(*Mpint)) * n.Type.Width
+				a.Xoffset += n.Right.Int64() * n.Type.Width
 				Fixlargeoffset(a)
 				return
 			}
@@ -1761,7 +1751,7 @@ func Bvgen(n, res *Node, wantTrue bool) {
 func bvgenjump(n, res *Node, wantTrue, geninit bool) {
 	init := n.Ninit
 	if !geninit {
-		n.Ninit = nil
+		n.Ninit.Set(nil)
 	}
 	p1 := Gbranch(obj.AJMP, nil, 0)
 	p2 := Pc
@@ -1771,7 +1761,7 @@ func bvgenjump(n, res *Node, wantTrue, geninit bool) {
 	Bgen(n, wantTrue, 0, p2)
 	Thearch.Gmove(Nodbool(false), res)
 	Patch(p3, Pc)
-	n.Ninit = init
+	n.Ninit.MoveNodes(&init)
 }
 
 // bgenx is the backend for Bgen and Bvgen.
@@ -1793,14 +1783,14 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	Genlist(n.Ninit)
 
 	if n.Type == nil {
-		Convlit(&n, Types[TBOOL])
+		n = convlit(n, Types[TBOOL])
 		if n.Type == nil {
 			return
 		}
 	}
 
-	if n.Type.Etype != TBOOL {
-		Fatal("bgen: bad type %v for %v", n.Type, Oconv(int(n.Op), 0))
+	if !n.Type.IsBoolean() {
+		Fatalf("bgen: bad type %v for %v", n.Type, n.Op)
 	}
 
 	for n.Op == OCONVNOP {
@@ -1808,7 +1798,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		Genlist(n.Ninit)
 	}
 
-	if Thearch.Bgen_float != nil && n.Left != nil && Isfloat[n.Left.Type.Etype] {
+	if Thearch.Bgen_float != nil && n.Left != nil && n.Left.Type.IsFloat() {
 		if genval {
 			bvgenjump(n, res, wantTrue, false)
 			return
@@ -1835,13 +1825,14 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		return
 
 	case ONAME:
+		// Some architectures might need a temporary or other help here,
+		// but they don't support direct generation of a bool value yet.
+		// We can fix that as we go.
+		mayNeedTemp := Ctxt.Arch.InFamily(sys.ARM, sys.ARM64, sys.MIPS64, sys.PPC64, sys.S390X)
+
 		if genval {
-			// 5g, 7g, and 9g might need a temporary or other help here,
-			// but they don't support direct generation of a bool value yet.
-			// We can fix that as we go.
-			switch Ctxt.Arch.Thechar {
-			case '5', '7', '9':
-				Fatal("genval 5g, 7g, 9g ONAMES not fully implemented")
+			if mayNeedTemp {
+				Fatalf("genval ONAMES not fully implemented")
 			}
 			Cgen(n, res)
 			if !wantTrue {
@@ -1850,7 +1841,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 			return
 		}
 
-		if n.Addable && Ctxt.Arch.Thechar != '5' && Ctxt.Arch.Thechar != '7' && Ctxt.Arch.Thechar != '9' {
+		if n.Addable && !mayNeedTemp {
 			// no need for a temporary
 			bgenNonZero(n, nil, wantTrue, likely, to)
 			return
@@ -1865,14 +1856,14 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	case OLITERAL:
 		// n is a constant.
 		if !Isconst(n, CTBOOL) {
-			Fatal("bgen: non-bool const %v\n", Nconv(n, obj.FmtLong))
+			Fatalf("bgen: non-bool const %v\n", Nconv(n, FmtLong))
 		}
 		if genval {
-			Cgen(Nodbool(wantTrue == n.Val.U.(bool)), res)
+			Cgen(Nodbool(wantTrue == n.Val().U.(bool)), res)
 			return
 		}
 		// If n == wantTrue, jump; otherwise do nothing.
-		if wantTrue == n.Val.U.(bool) {
+		if wantTrue == n.Val().U.(bool) {
 			Patch(Gbranch(obj.AJMP, nil, likely), to)
 		}
 		return
@@ -1923,17 +1914,17 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	// n.Op is one of OEQ, ONE, OLT, OGT, OLE, OGE
 	nl := n.Left
 	nr := n.Right
-	a := int(n.Op)
+	op := n.Op
 
 	if !wantTrue {
-		if Isfloat[nr.Type.Etype] {
+		if nr.Type.IsFloat() {
 			// Brcom is not valid on floats when NaN is involved.
 			ll := n.Ninit // avoid re-genning Ninit
-			n.Ninit = nil
+			n.Ninit.Set(nil)
 			if genval {
 				bgenx(n, res, true, likely, to)
 				Thearch.Gins(Thearch.Optoas(OXOR, Types[TUINT8]), Nodintconst(1), res) // res = !res
-				n.Ninit = ll
+				n.Ninit.Set(ll.Slice())
 				return
 			}
 			p1 := Gbranch(obj.AJMP, nil, 0)
@@ -1942,24 +1933,24 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 			bgenx(n, res, true, -likely, p2)
 			Patch(Gbranch(obj.AJMP, nil, 0), to)
 			Patch(p2, Pc)
-			n.Ninit = ll
+			n.Ninit.Set(ll.Slice())
 			return
 		}
 
-		a = Brcom(a)
+		op = Brcom(op)
 	}
 	wantTrue = true
 
 	// make simplest on right
 	if nl.Op == OLITERAL || (nl.Ullman < nr.Ullman && nl.Ullman < UINF) {
-		a = Brrev(a)
+		op = Brrev(op)
 		nl, nr = nr, nl
 	}
 
-	if Isslice(nl.Type) || Isinter(nl.Type) {
+	if nl.Type.IsSlice() || nl.Type.IsInterface() {
 		// front end should only leave cmp to literal nil
-		if (a != OEQ && a != ONE) || nr.Op != OLITERAL {
-			if Isslice(nl.Type) {
+		if (op != OEQ && op != ONE) || nr.Op != OLITERAL {
+			if nl.Type.IsSlice() {
 				Yyerror("illegal slice comparison")
 			} else {
 				Yyerror("illegal interface comparison")
@@ -1969,7 +1960,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 
 		var ptr Node
 		Igen(nl, &ptr, nil)
-		if Isslice(nl.Type) {
+		if nl.Type.IsSlice() {
 			ptr.Xoffset += int64(Array_array)
 		}
 		ptr.Type = Types[Tptr]
@@ -1977,17 +1968,17 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		Regalloc(&tmp, ptr.Type, &ptr)
 		Cgen(&ptr, &tmp)
 		Regfree(&ptr)
-		bgenNonZero(&tmp, res, a == OEQ != wantTrue, likely, to)
+		bgenNonZero(&tmp, res, op == OEQ != wantTrue, likely, to)
 		Regfree(&tmp)
 		return
 	}
 
-	if Iscomplex[nl.Type.Etype] {
-		complexbool(a, nl, nr, res, wantTrue, likely, to)
+	if nl.Type.IsComplex() {
+		complexbool(op, nl, nr, res, wantTrue, likely, to)
 		return
 	}
 
-	if Ctxt.Arch.Regsize == 4 && Is64(nr.Type) {
+	if Ctxt.Arch.RegSize == 4 && Is64(nr.Type) {
 		if genval {
 			// TODO: Teach Cmp64 to generate boolean values and remove this.
 			bvgenjump(n, res, wantTrue, false)
@@ -1999,7 +1990,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		if !nr.Addable {
 			nr = CgenTemp(nr)
 		}
-		Thearch.Cmp64(nl, nr, a, likely, to)
+		Thearch.Cmp64(nl, nr, op, likely, to)
 		return
 	}
 
@@ -2007,6 +1998,7 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		var n1 Node
 		Regalloc(&n1, nl.Type, nil)
 		Cgen(nl, &n1)
+		nl = &n1
 
 		var tmp Node
 		Tempname(&tmp, nl.Type)
@@ -2016,14 +2008,15 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		var n2 Node
 		Regalloc(&n2, nr.Type, nil)
 		Cgen(nr, &n2)
-		Regfree(&n2)
+		nr = &n2
 
 		Regalloc(&n1, nl.Type, nil)
 		Cgen(&tmp, &n1)
 		Regfree(&n1)
+		Regfree(&n2)
 	} else {
 		var n1 Node
-		if !nl.Addable && Ctxt.Arch.Thechar == '8' {
+		if !nl.Addable && Ctxt.Arch.Family == sys.I386 {
 			Tempname(&n1, nl.Type)
 		} else {
 			Regalloc(&n1, nl.Type, nil)
@@ -2032,13 +2025,13 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 		Cgen(nl, &n1)
 		nl = &n1
 
-		if Smallintconst(nr) && Ctxt.Arch.Thechar != '9' {
+		if Smallintconst(nr) && Ctxt.Arch.Family != sys.MIPS64 && Ctxt.Arch.Family != sys.PPC64 {
 			Thearch.Gins(Thearch.Optoas(OCMP, nr.Type), nl, nr)
-			bins(nr.Type, res, a, likely, to)
+			bins(nr.Type, res, op, likely, to)
 			return
 		}
 
-		if !nr.Addable && Ctxt.Arch.Thechar == '8' {
+		if !nr.Addable && Ctxt.Arch.Family == sys.I386 {
 			nr = CgenTemp(nr)
 		}
 
@@ -2052,9 +2045,16 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	l, r := nl, nr
 
 	// On x86, only < and <= work right with NaN; reverse if needed
-	if Ctxt.Arch.Thechar == '6' && Isfloat[nl.Type.Etype] && (a == OGT || a == OGE) {
+	if Ctxt.Arch.Family == sys.AMD64 && nl.Type.IsFloat() && (op == OGT || op == OGE) {
 		l, r = r, l
-		a = Brrev(a)
+		op = Brrev(op)
+	}
+
+	// MIPS does not have CMP instruction
+	if Ctxt.Arch.Family == sys.MIPS64 {
+		p := Thearch.Ginscmp(op, nr.Type, l, r, likely)
+		Patch(p, to)
+		return
 	}
 
 	// Do the comparison.
@@ -2062,23 +2062,23 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 
 	// Handle floating point special cases.
 	// Note that 8g has Bgen_float and is handled above.
-	if Isfloat[nl.Type.Etype] {
-		switch Ctxt.Arch.Thechar {
-		case '5':
+	if nl.Type.IsFloat() {
+		switch Ctxt.Arch.Family {
+		case sys.ARM:
 			if genval {
-				Fatal("genval 5g Isfloat special cases not implemented")
+				Fatalf("genval 5g Isfloat special cases not implemented")
 			}
 			switch n.Op {
 			case ONE:
 				Patch(Gbranch(Thearch.Optoas(OPS, nr.Type), nr.Type, likely), to)
-				Patch(Gbranch(Thearch.Optoas(a, nr.Type), nr.Type, likely), to)
+				Patch(Gbranch(Thearch.Optoas(op, nr.Type), nr.Type, likely), to)
 			default:
 				p := Gbranch(Thearch.Optoas(OPS, nr.Type), nr.Type, -likely)
-				Patch(Gbranch(Thearch.Optoas(a, nr.Type), nr.Type, likely), to)
+				Patch(Gbranch(Thearch.Optoas(op, nr.Type), nr.Type, likely), to)
 				Patch(p, Pc)
 			}
 			return
-		case '6':
+		case sys.AMD64:
 			switch n.Op {
 			case OEQ:
 				// neither NE nor P
@@ -2112,20 +2112,20 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 				}
 				return
 			}
-		case '7', '9':
+		case sys.ARM64, sys.PPC64:
 			if genval {
-				Fatal("genval 7g, 9g Isfloat special cases not implemented")
+				Fatalf("genval 7g, 9g Isfloat special cases not implemented")
 			}
 			switch n.Op {
 			// On arm64 and ppc64, <= and >= mishandle NaN. Must decompose into < or > and =.
 			// TODO(josh): Convert a <= b to b > a instead?
 			case OLE, OGE:
-				if a == OLE {
-					a = OLT
+				if op == OLE {
+					op = OLT
 				} else {
-					a = OGT
+					op = OGT
 				}
-				Patch(Gbranch(Thearch.Optoas(a, nr.Type), nr.Type, likely), to)
+				Patch(Gbranch(Thearch.Optoas(op, nr.Type), nr.Type, likely), to)
 				Patch(Gbranch(Thearch.Optoas(OEQ, nr.Type), nr.Type, likely), to)
 				return
 			}
@@ -2133,26 +2133,35 @@ func bgenx(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	}
 
 	// Not a special case. Insert the conditional jump or value gen.
-	bins(nr.Type, res, a, likely, to)
+	bins(nr.Type, res, op, likely, to)
 }
 
 func bgenNonZero(n, res *Node, wantTrue bool, likely int, to *obj.Prog) {
 	// TODO: Optimize on systems that can compare to zero easily.
-	a := ONE
+	var op Op = ONE
 	if !wantTrue {
-		a = OEQ
+		op = OEQ
 	}
+
+	// MIPS does not have CMP instruction
+	if Thearch.LinkArch.Family == sys.MIPS64 {
+		p := Gbranch(Thearch.Optoas(op, n.Type), n.Type, likely)
+		Naddr(&p.From, n)
+		Patch(p, to)
+		return
+	}
+
 	var zero Node
 	Nodconst(&zero, n.Type, 0)
 	Thearch.Gins(Thearch.Optoas(OCMP, n.Type), n, &zero)
-	bins(n.Type, res, a, likely, to)
+	bins(n.Type, res, op, likely, to)
 }
 
 // bins inserts an instruction to handle the result of a compare.
 // If res is non-nil, it inserts appropriate value generation instructions.
 // If res is nil, it inserts a branch to to.
-func bins(typ *Type, res *Node, a, likely int, to *obj.Prog) {
-	a = Thearch.Optoas(a, typ)
+func bins(typ *Type, res *Node, op Op, likely int, to *obj.Prog) {
+	a := Thearch.Optoas(op, typ)
 	if res != nil {
 		// value gen
 		Thearch.Ginsboolval(a, res)
@@ -2187,7 +2196,7 @@ func stkof(n *Node) int64 {
 
 	case ODOT:
 		t := n.Left.Type
-		if Isptr[t.Etype] {
+		if t.IsPtr() {
 			break
 		}
 		off := stkof(n.Left)
@@ -2198,7 +2207,7 @@ func stkof(n *Node) int64 {
 
 	case OINDEX:
 		t := n.Left.Type
-		if !Isfixedarray(t) {
+		if !t.IsArray() {
 			break
 		}
 		off := stkof(n.Left)
@@ -2206,24 +2215,19 @@ func stkof(n *Node) int64 {
 			return off
 		}
 		if Isconst(n.Right, CTINT) {
-			return off + t.Type.Width*Mpgetfix(n.Right.Val.U.(*Mpint))
+			return off + t.Elem().Width*n.Right.Int64()
 		}
 		return +1000 // on stack but not sure exactly where
 
 	case OCALLMETH, OCALLINTER, OCALLFUNC:
 		t := n.Left.Type
-		if Isptr[t.Etype] {
-			t = t.Type
+		if t.IsPtr() {
+			t = t.Elem()
 		}
 
-		var flist Iter
-		t = Structfirst(&flist, Getoutarg(t))
-		if t != nil {
-			w := t.Width
-			if HasLinkRegister() {
-				w += int64(Ctxt.Arch.Ptrsize)
-			}
-			return w
+		f := t.Results().Field(0)
+		if f != nil {
+			return f.Offset + Ctxt.FixedFrameSize()
 		}
 	}
 
@@ -2232,11 +2236,9 @@ func stkof(n *Node) int64 {
 	return -1000 // not on stack
 }
 
-/*
- * block copy:
- *	memmove(&ns, &n, w);
- * if wb is true, needs write barrier.
- */
+// block copy:
+//	memmove(&ns, &n, w);
+// if wb is true, needs write barrier.
 func sgen_wb(n *Node, ns *Node, w int64, wb bool) {
 	if Debug['g'] != 0 {
 		op := "sgen"
@@ -2249,19 +2251,19 @@ func sgen_wb(n *Node, ns *Node, w int64, wb bool) {
 	}
 
 	if n.Ullman >= UINF && ns.Ullman >= UINF {
-		Fatal("sgen UINF")
+		Fatalf("sgen UINF")
 	}
 
 	if w < 0 {
-		Fatal("sgen copy %d", w)
+		Fatalf("sgen copy %d", w)
 	}
 
 	// If copying .args, that's all the results, so record definition sites
 	// for them for the liveness analysis.
 	if ns.Op == ONAME && ns.Sym.Name == ".args" {
-		for l := Curfn.Func.Dcl; l != nil; l = l.Next {
-			if l.N.Class == PPARAMOUT {
-				Gvardef(l.N)
+		for _, ln := range Curfn.Func.Dcl {
+			if ln.Class == PPARAMOUT {
+				Gvardef(ln)
 			}
 		}
 	}
@@ -2292,7 +2294,7 @@ func sgen_wb(n *Node, ns *Node, w int64, wb bool) {
 
 	if osrc != -1000 && odst != -1000 && (osrc == 1000 || odst == 1000) || wb && osrc != -1000 {
 		// osrc and odst both on stack, and at least one is in
-		// an unknown position.  Could generate code to test
+		// an unknown position. Could generate code to test
 		// for forward/backward copy, but instead just copy
 		// to a temporary location first.
 		//
@@ -2314,15 +2316,13 @@ func sgen_wb(n *Node, ns *Node, w int64, wb bool) {
 	Thearch.Blockcopy(n, ns, osrc, odst, w)
 }
 
-/*
- * generate:
- *	call f
- *	proc=-1	normal call but no return
- *	proc=0	normal call
- *	proc=1	goroutine run in new proc
- *	proc=2	defer call save away stack
-  *	proc=3	normal call to C pointer (not Go func value)
-*/
+// generate:
+//	call f
+//	proc=-1	normal call but no return
+//	proc=0	normal call
+//	proc=1	goroutine run in new proc
+//	proc=2	defer call save away stack
+//	proc=3	normal call to C pointer (not Go func value)
 func Ginscall(f *Node, proc int) {
 	if f.Type != nil {
 		extra := int32(0)
@@ -2334,21 +2334,45 @@ func Ginscall(f *Node, proc int) {
 
 	switch proc {
 	default:
-		Fatal("Ginscall: bad proc %d", proc)
+		Fatalf("Ginscall: bad proc %d", proc)
 
 	case 0, // normal call
 		-1: // normal call but no return
 		if f.Op == ONAME && f.Class == PFUNC {
 			if f == Deferreturn {
-				// Deferred calls will appear to be returning to
-				// the CALL deferreturn(SB) that we are about to emit.
-				// However, the stack trace code will show the line
-				// of the instruction byte before the return PC.
-				// To avoid that being an unrelated instruction,
-				// insert an actual hardware NOP that will have the right line number.
-				// This is different from obj.ANOP, which is a virtual no-op
-				// that doesn't make it into the instruction stream.
+				// Deferred calls will appear to be returning to the CALL
+				// deferreturn(SB) that we are about to emit. However, the
+				// stack scanning code will think that the instruction
+				// before the CALL is executing. To avoid the scanning
+				// code making bad assumptions (both cosmetic such as
+				// showing the wrong line number and fatal, such as being
+				// confused over whether a stack slot contains a pointer
+				// or a scalar) insert an actual hardware NOP that will
+				// have the right line number. This is different from
+				// obj.ANOP, which is a virtual no-op that doesn't make it
+				// into the instruction stream.
 				Thearch.Ginsnop()
+
+				if Thearch.LinkArch.Family == sys.PPC64 {
+					// On ppc64, when compiling Go into position
+					// independent code on ppc64le we insert an
+					// instruction to reload the TOC pointer from the
+					// stack as well. See the long comment near
+					// jmpdefer in runtime/asm_ppc64.s for why.
+					// If the MOVD is not needed, insert a hardware NOP
+					// so that the same number of instructions are used
+					// on ppc64 in both shared and non-shared modes.
+					if Ctxt.Flag_shared {
+						p := Thearch.Gins(ppc64.AMOVD, nil, nil)
+						p.From.Type = obj.TYPE_MEM
+						p.From.Offset = 24
+						p.From.Reg = ppc64.REGSP
+						p.To.Type = obj.TYPE_REG
+						p.To.Reg = ppc64.REG_R2
+					} else {
+						Thearch.Ginsnop()
+					}
+				}
 			}
 
 			p := Thearch.Gins(obj.ACALL, nil, f)
@@ -2379,17 +2403,11 @@ func Ginscall(f *Node, proc int) {
 		// size of arguments at 0(SP)
 		stk.Op = OINDREG
 		stk.Reg = int16(Thearch.REGSP)
-		stk.Xoffset = 0
-		if HasLinkRegister() {
-			stk.Xoffset += int64(Ctxt.Arch.Ptrsize)
-		}
+		stk.Xoffset = Ctxt.FixedFrameSize()
 		Thearch.Ginscon(Thearch.Optoas(OAS, Types[TINT32]), int64(Argsize(f.Type)), &stk)
 
 		// FuncVal* at 8(SP)
-		stk.Xoffset = int64(Widthptr)
-		if HasLinkRegister() {
-			stk.Xoffset += int64(Ctxt.Arch.Ptrsize)
-		}
+		stk.Xoffset = int64(Widthptr) + Ctxt.FixedFrameSize()
 
 		var reg Node
 		Nodreg(&reg, Types[Tptr], Thearch.REGCALLX2)
@@ -2399,8 +2417,8 @@ func Ginscall(f *Node, proc int) {
 		if proc == 1 {
 			Ginscall(Newproc, 0)
 		} else {
-			if Hasdefer == 0 {
-				Fatal("hasdefer=0 but has defer")
+			if !hasdefer {
+				Fatalf("hasdefer=0 but has defer")
 			}
 			Ginscall(Deferproc, 0)
 		}
@@ -2414,19 +2432,12 @@ func Ginscall(f *Node, proc int) {
 	}
 }
 
-/*
- * n is call to interface method.
- * generate res = n.
- */
+// n is call to interface method.
+// generate res = n.
 func cgen_callinter(n *Node, res *Node, proc int) {
 	i := n.Left
 	if i.Op != ODOTINTER {
-		Fatal("cgen_callinter: not ODOTINTER %v", Oconv(int(i.Op), 0))
-	}
-
-	f := i.Right // field
-	if f.Op != ONAME {
-		Fatal("cgen_callinter: not ONAME %v", Oconv(int(f.Op), 0))
+		Fatalf("cgen_callinter: not ODOTINTER %v", i.Op)
 	}
 
 	i = i.Left // interface
@@ -2447,10 +2458,7 @@ func cgen_callinter(n *Node, res *Node, proc int) {
 
 	var nodsp Node
 	Nodindreg(&nodsp, Types[Tptr], Thearch.REGSP)
-	nodsp.Xoffset = 0
-	if HasLinkRegister() {
-		nodsp.Xoffset += int64(Ctxt.Arch.Ptrsize)
-	}
+	nodsp.Xoffset = Ctxt.FixedFrameSize()
 	if proc != 0 {
 		nodsp.Xoffset += 2 * int64(Widthptr) // leave room for size & fn
 	}
@@ -2469,7 +2477,7 @@ func cgen_callinter(n *Node, res *Node, proc int) {
 	var nodr Node
 	Regalloc(&nodr, Types[Tptr], &nodo)
 	if n.Left.Xoffset == BADWIDTH {
-		Fatal("cgen_callinter: badwidth")
+		Fatalf("cgen_callinter: badwidth")
 	}
 	Cgen_checknil(&nodo) // in case offset is huge
 	nodo.Op = OINDREG
@@ -2490,12 +2498,10 @@ func cgen_callinter(n *Node, res *Node, proc int) {
 	Regfree(&nodo)
 }
 
-/*
- * generate function call;
- *	proc=0	normal call
- *	proc=1	goroutine run in new proc
- *	proc=2	defer call save away stack
- */
+// generate function call;
+//	proc=0	normal call
+//	proc=1	goroutine run in new proc
+//	proc=2	defer call save away stack
 func cgen_call(n *Node, proc int) {
 	if n == nil {
 		return
@@ -2541,26 +2547,18 @@ func cgen_call(n *Node, proc int) {
 	Ginscall(n.Left, proc)
 }
 
-func HasLinkRegister() bool {
-	c := Ctxt.Arch.Thechar
-	return c != '6' && c != '8'
-}
-
-/*
- * call to n has already been generated.
- * generate:
- *	res = return value from call.
- */
+// call to n has already been generated.
+// generate:
+//	res = return value from call.
 func cgen_callret(n *Node, res *Node) {
 	t := n.Left.Type
 	if t.Etype == TPTR32 || t.Etype == TPTR64 {
-		t = t.Type
+		t = t.Elem()
 	}
 
-	var flist Iter
-	fp := Structfirst(&flist, Getoutarg(t))
+	fp := t.Results().Field(0)
 	if fp == nil {
-		Fatal("cgen_callret: nil")
+		Fatalf("cgen_callret: nil")
 	}
 
 	var nod Node
@@ -2568,39 +2566,30 @@ func cgen_callret(n *Node, res *Node) {
 	nod.Reg = int16(Thearch.REGSP)
 	nod.Addable = true
 
-	nod.Xoffset = fp.Width
-	if HasLinkRegister() {
-		nod.Xoffset += int64(Ctxt.Arch.Ptrsize)
-	}
+	nod.Xoffset = fp.Offset + Ctxt.FixedFrameSize()
 	nod.Type = fp.Type
 	Cgen_as(res, &nod)
 }
 
-/*
- * call to n has already been generated.
- * generate:
- *	res = &return value from call.
- */
+// call to n has already been generated.
+// generate:
+//	res = &return value from call.
 func cgen_aret(n *Node, res *Node) {
 	t := n.Left.Type
-	if Isptr[t.Etype] {
-		t = t.Type
+	if t.IsPtr() {
+		t = t.Elem()
 	}
 
-	var flist Iter
-	fp := Structfirst(&flist, Getoutarg(t))
+	fp := t.Results().Field(0)
 	if fp == nil {
-		Fatal("cgen_aret: nil")
+		Fatalf("cgen_aret: nil")
 	}
 
 	var nod1 Node
 	nod1.Op = OINDREG
 	nod1.Reg = int16(Thearch.REGSP)
 	nod1.Addable = true
-	nod1.Xoffset = fp.Width
-	if HasLinkRegister() {
-		nod1.Xoffset += int64(Ctxt.Arch.Ptrsize)
-	}
+	nod1.Xoffset = fp.Offset + Ctxt.FixedFrameSize()
 	nod1.Type = fp.Type
 
 	if res.Op != OREGISTER {
@@ -2614,15 +2603,13 @@ func cgen_aret(n *Node, res *Node) {
 	}
 }
 
-/*
- * generate return.
- * n->left is assignments to return values.
- */
+// generate return.
+// n->left is assignments to return values.
 func cgen_ret(n *Node) {
 	if n != nil {
 		Genlist(n.List) // copy out args
 	}
-	if Hasdefer != 0 {
+	if hasdefer {
 		Ginscall(Deferreturn, 0)
 	}
 	Genlist(Curfn.Func.Exit)
@@ -2634,26 +2621,70 @@ func cgen_ret(n *Node) {
 	}
 }
 
-/*
- * generate division according to op, one of:
- *	res = nl / nr
- *	res = nl % nr
- */
-func cgen_div(op int, nl *Node, nr *Node, res *Node) {
+// hasHMUL64 reports whether the architecture supports 64-bit
+// signed and unsigned high multiplication (OHMUL).
+func hasHMUL64() bool {
+	switch Ctxt.Arch.Family {
+	case sys.AMD64, sys.S390X, sys.ARM64:
+		return true
+	case sys.ARM, sys.I386, sys.MIPS64, sys.PPC64:
+		return false
+	}
+	Fatalf("unknown architecture")
+	return false
+}
+
+// hasRROTC64 reports whether the architecture supports 64-bit
+// rotate through carry instructions (ORROTC).
+func hasRROTC64() bool {
+	switch Ctxt.Arch.Family {
+	case sys.AMD64:
+		return true
+	case sys.ARM, sys.ARM64, sys.I386, sys.MIPS64, sys.PPC64, sys.S390X:
+		return false
+	}
+	Fatalf("unknown architecture")
+	return false
+}
+
+func hasRightShiftWithCarry() bool {
+	switch Ctxt.Arch.Family {
+	case sys.ARM64:
+		return true
+	case sys.AMD64, sys.ARM, sys.I386, sys.MIPS64, sys.PPC64, sys.S390X:
+		return false
+	}
+	Fatalf("unknown architecture")
+	return false
+}
+
+func hasAddSetCarry() bool {
+	switch Ctxt.Arch.Family {
+	case sys.ARM64:
+		return true
+	case sys.AMD64, sys.ARM, sys.I386, sys.MIPS64, sys.PPC64, sys.S390X:
+		return false
+	}
+	Fatalf("unknown architecture")
+	return false
+}
+
+// generate division according to op, one of:
+//	res = nl / nr
+//	res = nl % nr
+func cgen_div(op Op, nl *Node, nr *Node, res *Node) {
 	var w int
 
-	// TODO(rsc): arm64 needs to support the relevant instructions
-	// in peep and optoas in order to enable this.
-	// TODO(rsc): ppc64 needs to support the relevant instructions
-	// in peep and optoas in order to enable this.
-	if nr.Op != OLITERAL || Ctxt.Arch.Thechar == '7' || Ctxt.Arch.Thechar == '9' {
+	// Architectures need to support 64-bit high multiplications
+	// (OHMUL) in order to perform divide by constant optimizations.
+	if nr.Op != OLITERAL || !hasHMUL64() {
 		goto longdiv
 	}
 	w = int(nl.Type.Width * 8)
 
 	// Front end handled 32-bit division. We only need to handle 64-bit.
-	// try to do division by multiply by (2^w)/d
-	// see hacker's delight chapter 10
+	// Try to do division using multiplication: (2^w)/d.
+	// See Hacker's Delight, chapter 10.
 	switch Simtype[nl.Type.Etype] {
 	default:
 		goto longdiv
@@ -2661,10 +2692,22 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 	case TUINT64:
 		var m Magic
 		m.W = w
-		m.Ud = uint64(Mpgetfix(nr.Val.U.(*Mpint)))
+		m.Ud = uint64(nr.Int64())
 		Umagic(&m)
 		if m.Bad != 0 {
 			break
+		}
+
+		// In order to add the numerator we need to be able to
+		// avoid overflow. This is done by shifting the result of the
+		// addition right by 1 and inserting the carry bit into
+		// the MSB. For now this needs the RROTC instruction.
+		// TODO(mundaym): Hacker's Delight 2nd ed. chapter 10 proposes
+		// an alternative sequence of instructions for architectures
+		// (TODO: MIPS64, PPC64, S390X) that do not have a shift
+		// right with carry instruction.
+		if m.Ua != 0 && !hasRROTC64() && !hasRightShiftWithCarry() {
+			goto longdiv
 		}
 		if op == OMOD {
 			goto longmod
@@ -2679,13 +2722,21 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 		Thearch.Cgen_hmul(&n1, &n2, &n3)
 
 		if m.Ua != 0 {
-			// need to add numerator accounting for overflow
-			Thearch.Gins(Thearch.Optoas(OADD, nl.Type), &n1, &n3)
+			// Need to add numerator accounting for overflow.
+			if hasAddSetCarry() {
+				Thearch.AddSetCarry(&n1, &n3, &n3)
+			} else {
+				Thearch.Gins(Thearch.Optoas(OADD, nl.Type), &n1, &n3)
+			}
 
-			Nodconst(&n2, nl.Type, 1)
-			Thearch.Gins(Thearch.Optoas(ORROTC, nl.Type), &n2, &n3)
-			Nodconst(&n2, nl.Type, int64(m.S)-1)
-			Thearch.Gins(Thearch.Optoas(ORSH, nl.Type), &n2, &n3)
+			if !hasRROTC64() {
+				Thearch.RightShiftWithCarry(&n3, uint(m.S), &n3)
+			} else {
+				Nodconst(&n2, nl.Type, 1)
+				Thearch.Gins(Thearch.Optoas(ORROTC, nl.Type), &n2, &n3)
+				Nodconst(&n2, nl.Type, int64(m.S)-1)
+				Thearch.Gins(Thearch.Optoas(ORSH, nl.Type), &n2, &n3)
+			}
 		} else {
 			Nodconst(&n2, nl.Type, int64(m.S))
 			Thearch.Gins(Thearch.Optoas(ORSH, nl.Type), &n2, &n3) // shift dx
@@ -2699,7 +2750,7 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 	case TINT64:
 		var m Magic
 		m.W = w
-		m.Sd = Mpgetfix(nr.Val.U.(*Mpint))
+		m.Sd = nr.Int64()
 		Smagic(&m)
 		if m.Bad != 0 {
 			break
@@ -2717,7 +2768,7 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 		Thearch.Cgen_hmul(&n1, &n2, &n3)
 
 		if m.Sm < 0 {
-			// need to add numerator
+			// Need to add numerator (cannot overflow).
 			Thearch.Gins(Thearch.Optoas(OADD, nl.Type), &n1, &n3)
 		}
 
@@ -2730,8 +2781,8 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 		Thearch.Gins(Thearch.Optoas(OSUB, nl.Type), &n1, &n3) // added
 
 		if m.Sd < 0 {
-			// this could probably be removed
-			// by factoring it into the multiplier
+			// This could probably be removed by factoring it into
+			// the multiplier.
 			Thearch.Gins(Thearch.Optoas(OMINUS, nl.Type), nil, &n3)
 		}
 
@@ -2743,14 +2794,14 @@ func cgen_div(op int, nl *Node, nr *Node, res *Node) {
 
 	goto longdiv
 
-	// division and mod using (slow) hardware instruction
+	// Division and mod using (slow) hardware instruction.
 longdiv:
 	Thearch.Dodiv(op, nl, nr, res)
 
 	return
 
-	// mod using formula A%B = A-(A/B*B) but
-	// we know that there is a fast algorithm for A/B
+	// Mod using formula A%B = A-(A/B*B) but
+	// we know that there is a fast algorithm for A/B.
 longmod:
 	var n1 Node
 	Regalloc(&n1, nl.Type, res)
@@ -2760,11 +2811,6 @@ longmod:
 	Regalloc(&n2, nl.Type, nil)
 	cgen_div(ODIV, &n1, nr, &n2)
 	a := Thearch.Optoas(OMUL, nl.Type)
-	if w == 8 {
-		// use 2-operand 16-bit multiply
-		// because there is no 2-operand 8-bit multiply
-		a = Thearch.Optoas(OMUL, Types[TINT16]) // XXX was IMULW
-	}
 
 	if !Smallintconst(nr) {
 		var n3 Node
@@ -2809,14 +2855,9 @@ func cgen_append(n, res *Node) {
 		Dump("cgen_append-n", n)
 		Dump("cgen_append-res", res)
 	}
-	if res.Op != ONAME && !samesafeexpr(res, n.List.N) {
-		Dump("cgen_append-n", n)
-		Dump("cgen_append-res", res)
-		Fatal("append not lowered")
-	}
-	for l := n.List; l != nil; l = l.Next {
-		if l.N.Ullman >= UINF {
-			Fatal("append with function call arguments")
+	for _, n1 := range n.List.Slice() {
+		if n1.Ullman >= UINF {
+			Fatalf("append with function call arguments")
 		}
 	}
 
@@ -2824,7 +2865,7 @@ func cgen_append(n, res *Node) {
 	//
 	// If res and src are the same, we can avoid writing to base and cap
 	// unless we grow the underlying array.
-	needFullUpdate := !samesafeexpr(res, n.List.N)
+	needFullUpdate := !samesafeexpr(res, n.List.First())
 
 	// Copy src triple into base, len, cap.
 	base := temp(Types[Tptr])
@@ -2832,7 +2873,7 @@ func cgen_append(n, res *Node) {
 	cap := temp(Types[TUINT])
 
 	var src Node
-	Igen(n.List.N, &src, nil)
+	Igen(n.List.First(), &src, nil)
 	src.Type = Types[Tptr]
 	Thearch.Gmove(&src, base)
 	src.Type = Types[TUINT]
@@ -2845,7 +2886,7 @@ func cgen_append(n, res *Node) {
 	var rlen Node
 	Regalloc(&rlen, Types[TUINT], nil)
 	Thearch.Gmove(len, &rlen)
-	Thearch.Ginscon(Thearch.Optoas(OADD, Types[TUINT]), int64(count(n.List)-1), &rlen)
+	Thearch.Ginscon(Thearch.Optoas(OADD, Types[TUINT]), int64(n.List.Len()-1), &rlen)
 	p := Thearch.Ginscmp(OLE, Types[TUINT], &rlen, cap, +1)
 	// Note: rlen and src are Regrealloc'ed below at the target of the
 	// branch we just emitted; do not reuse these Go variables for
@@ -2858,12 +2899,9 @@ func cgen_append(n, res *Node) {
 	arg.Op = OINDREG
 	arg.Reg = int16(Thearch.REGSP)
 	arg.Addable = true
-	arg.Xoffset = 0
-	if HasLinkRegister() {
-		arg.Xoffset = int64(Ctxt.Arch.Ptrsize)
-	}
+	arg.Xoffset = Ctxt.FixedFrameSize()
 	arg.Type = Ptrto(Types[TUINT8])
-	Cgen(typename(res.Type), &arg)
+	Cgen(typename(res.Type.Elem()), &arg)
 	arg.Xoffset += int64(Widthptr)
 
 	arg.Type = Types[Tptr]
@@ -2883,8 +2921,8 @@ func cgen_append(n, res *Node) {
 	arg.Xoffset += int64(Widthptr)
 	Regfree(&rlen)
 
-	fn := syslook("growslice", 1)
-	substArgTypes(fn, res.Type.Type, res.Type.Type)
+	fn := syslook("growslice")
+	fn = substArgTypes(fn, res.Type.Elem(), res.Type.Elem())
 	Ginscall(fn, 0)
 
 	if Widthptr == 4 && Widthreg == 8 {
@@ -2918,7 +2956,7 @@ func cgen_append(n, res *Node) {
 	dst.Xoffset += int64(Widthptr)
 	Regalloc(&r1, Types[TUINT], nil)
 	Thearch.Gmove(len, &r1)
-	Thearch.Ginscon(Thearch.Optoas(OADD, Types[TUINT]), int64(count(n.List)-1), &r1)
+	Thearch.Ginscon(Thearch.Optoas(OADD, Types[TUINT]), int64(n.List.Len()-1), &r1)
 	Thearch.Gmove(&r1, &dst)
 	Regfree(&r1)
 	dst.Xoffset += int64(Widthptr)
@@ -2956,7 +2994,7 @@ func cgen_append(n, res *Node) {
 	// is not going to use a write barrier.
 	i := 0
 	var r2 Node
-	for l := n.List.Next; l != nil; l = l.Next {
+	for _, n2 := range n.List.Slice()[1:] {
 		Regalloc(&r1, Types[Tptr], nil)
 		Thearch.Gmove(base, &r1)
 		Regalloc(&r2, Types[TUINT], nil)
@@ -2964,20 +3002,20 @@ func cgen_append(n, res *Node) {
 		if i > 0 {
 			Thearch.Gins(Thearch.Optoas(OADD, Types[TUINT]), Nodintconst(int64(i)), &r2)
 		}
-		w := res.Type.Type.Width
+		w := res.Type.Elem().Width
 		if Thearch.AddIndex != nil && Thearch.AddIndex(&r2, w, &r1) {
 			// r1 updated by back end
 		} else if w == 1 {
 			Thearch.Gins(Thearch.Optoas(OADD, Types[Tptr]), &r2, &r1)
 		} else {
-			Thearch.Ginscon(Thearch.Optoas(OMUL, Types[TUINT]), int64(w), &r2)
+			Thearch.Ginscon(Thearch.Optoas(OMUL, Types[TUINT]), w, &r2)
 			Thearch.Gins(Thearch.Optoas(OADD, Types[Tptr]), &r2, &r1)
 		}
 		Regfree(&r2)
 
 		r1.Op = OINDREG
-		r1.Type = res.Type.Type
-		cgen_wb(l.N, &r1, needwritebarrier(&r1, l.N))
+		r1.Type = res.Type.Elem()
+		cgen_wb(n2, &r1, needwritebarrier(&r1, n2))
 		Regfree(&r1)
 		i++
 	}
@@ -3014,11 +3052,11 @@ func cgen_slice(n, res *Node, wb bool) {
 	regalloc := Regalloc
 	ginscon := Thearch.Ginscon
 	gins := Thearch.Gins
-	if Thearch.Thechar == '8' {
+	if Thearch.LinkArch.Family == sys.I386 {
 		regalloc = func(n *Node, t *Type, reuse *Node) {
 			Tempname(n, t)
 		}
-		ginscon = func(as int, c int64, n *Node) {
+		ginscon = func(as obj.As, c int64, n *Node) {
 			var n1 Node
 			Regalloc(&n1, n.Type, n)
 			Thearch.Gmove(n, &n1)
@@ -3026,7 +3064,7 @@ func cgen_slice(n, res *Node, wb bool) {
 			Thearch.Gmove(&n1, n)
 			Regfree(&n1)
 		}
-		gins = func(as int, f, t *Node) *obj.Prog {
+		gins = func(as obj.As, f, t *Node) *obj.Prog {
 			var n1 Node
 			Regalloc(&n1, t.Type, t)
 			Thearch.Gmove(t, &n1)
@@ -3044,11 +3082,11 @@ func cgen_slice(n, res *Node, wb bool) {
 			return
 		}
 		if n.Op == OSLICEARR || n.Op == OSLICE3ARR {
-			Nodconst(&xlen, indexRegType, n.Left.Type.Type.Bound)
+			Nodconst(&xlen, indexRegType, n.Left.Type.Elem().NumElem())
 			return
 		}
 		if n.Op == OSLICESTR && Isconst(n.Left, CTSTR) {
-			Nodconst(&xlen, indexRegType, int64(len(n.Left.Val.U.(string))))
+			Nodconst(&xlen, indexRegType, int64(len(n.Left.Val().U.(string))))
 			return
 		}
 		regalloc(&xlen, indexRegType, nil)
@@ -3077,15 +3115,7 @@ func cgen_slice(n, res *Node, wb bool) {
 		x.Xoffset -= 2 * int64(Widthptr)
 	}
 
-	var x1, x2, x3 *Node // unevaluated index arguments
-	x1 = n.Right.Left
-	switch n.Op {
-	default:
-		x2 = n.Right.Right
-	case OSLICE3, OSLICE3ARR:
-		x2 = n.Right.Right.Left
-		x3 = n.Right.Right.Right
-	}
+	x1, x2, x3 := n.SliceBounds() // unevaluated index arguments
 
 	// load computes src into targ, but if src refers to the len or cap of n.Left,
 	// load copies those from xlen, xcap, loading xlen if needed.
@@ -3202,22 +3232,22 @@ func cgen_slice(n, res *Node, wb bool) {
 	// The func obvious below checks for out-of-order constant indexes.
 	var bound int64 = -1
 	if n.Op == OSLICEARR || n.Op == OSLICE3ARR {
-		bound = n.Left.Type.Type.Bound
+		bound = n.Left.Type.Elem().NumElem()
 	} else if n.Op == OSLICESTR && Isconst(n.Left, CTSTR) {
-		bound = int64(len(n.Left.Val.U.(string)))
+		bound = int64(len(n.Left.Val().U.(string)))
 	}
 	if Isconst(&i, CTINT) {
-		if mpcmpfixc(i.Val.U.(*Mpint), 0) < 0 || bound >= 0 && mpcmpfixc(i.Val.U.(*Mpint), bound) > 0 {
+		if i.Val().U.(*Mpint).CmpInt64(0) < 0 || bound >= 0 && i.Val().U.(*Mpint).CmpInt64(bound) > 0 {
 			Yyerror("slice index out of bounds")
 		}
 	}
 	if Isconst(&j, CTINT) {
-		if mpcmpfixc(j.Val.U.(*Mpint), 0) < 0 || bound >= 0 && mpcmpfixc(j.Val.U.(*Mpint), bound) > 0 {
+		if j.Val().U.(*Mpint).CmpInt64(0) < 0 || bound >= 0 && j.Val().U.(*Mpint).CmpInt64(bound) > 0 {
 			Yyerror("slice index out of bounds")
 		}
 	}
 	if Isconst(&k, CTINT) {
-		if mpcmpfixc(k.Val.U.(*Mpint), 0) < 0 || bound >= 0 && mpcmpfixc(k.Val.U.(*Mpint), bound) > 0 {
+		if k.Val().U.(*Mpint).CmpInt64(0) < 0 || bound >= 0 && k.Val().U.(*Mpint).CmpInt64(bound) > 0 {
 			Yyerror("slice index out of bounds")
 		}
 	}
@@ -3226,7 +3256,7 @@ func cgen_slice(n, res *Node, wb bool) {
 	same := func(n1, n2 *Node) bool {
 		return n1.Op == OREGISTER && n2.Op == OREGISTER && n1.Reg == n2.Reg ||
 			n1.Op == ONAME && n2.Op == ONAME && n1.Orig == n2.Orig && n1.Type == n2.Type && n1.Xoffset == n2.Xoffset ||
-			n1.Op == OLITERAL && n2.Op == OLITERAL && Mpcmpfixfix(n1.Val.U.(*Mpint), n2.Val.U.(*Mpint)) == 0
+			n1.Op == OLITERAL && n2.Op == OLITERAL && n1.Val().U.(*Mpint).Cmp(n2.Val().U.(*Mpint)) == 0
 	}
 
 	// obvious reports whether n1 <= n2 is obviously true,
@@ -3245,7 +3275,7 @@ func cgen_slice(n, res *Node, wb bool) {
 			return true // len(x) <= cap(x) always true
 		}
 		if Isconst(n1, CTINT) && Isconst(n2, CTINT) {
-			if Mpcmpfixfix(n1.Val.U.(*Mpint), n2.Val.U.(*Mpint)) <= 0 {
+			if n1.Val().U.(*Mpint).Cmp(n2.Val().U.(*Mpint)) <= 0 {
 				return true // n1, n2 constants such that n1 <= n2
 			}
 			Yyerror("slice index out of bounds")
@@ -3257,12 +3287,12 @@ func cgen_slice(n, res *Node, wb bool) {
 	compare := func(n1, n2 *Node) {
 		// n1 might be a 64-bit constant, even on 32-bit architectures,
 		// but it will be represented in 32 bits.
-		if Ctxt.Arch.Regsize == 4 && Is64(n1.Type) {
-			if mpcmpfixc(n1.Val.U.(*Mpint), 1<<31) >= 0 {
-				Fatal("missed slice out of bounds check")
+		if Ctxt.Arch.RegSize == 4 && Is64(n1.Type) {
+			if n1.Val().U.(*Mpint).CmpInt64(1<<31) >= 0 {
+				Fatalf("missed slice out of bounds check")
 			}
 			var tmp Node
-			Nodconst(&tmp, indexRegType, Mpgetfix(n1.Val.U.(*Mpint)))
+			Nodconst(&tmp, indexRegType, n1.Int64())
 			n1 = &tmp
 		}
 		p := Thearch.Ginscmp(OGT, indexRegType, n1, n2, -1)
@@ -3346,9 +3376,9 @@ func cgen_slice(n, res *Node, wb bool) {
 			switch j.Op {
 			case OLITERAL:
 				if Isconst(&i, CTINT) {
-					Nodconst(&j, indexRegType, Mpgetfix(j.Val.U.(*Mpint))-Mpgetfix(i.Val.U.(*Mpint)))
+					Nodconst(&j, indexRegType, j.Int64()-i.Int64())
 					if Debug_slice > 0 {
-						Warn("slice: result len == %d", Mpgetfix(j.Val.U.(*Mpint)))
+						Warn("slice: result len == %d", j.Int64())
 					}
 					break
 				}
@@ -3363,7 +3393,7 @@ func cgen_slice(n, res *Node, wb bool) {
 				fallthrough
 			case OREGISTER:
 				if i.Op == OLITERAL {
-					v := Mpgetfix(i.Val.U.(*Mpint))
+					v := i.Int64()
 					if v != 0 {
 						ginscon(Thearch.Optoas(OSUB, indexRegType), v, &j)
 					}
@@ -3406,9 +3436,9 @@ func cgen_slice(n, res *Node, wb bool) {
 			switch k.Op {
 			case OLITERAL:
 				if Isconst(&i, CTINT) {
-					Nodconst(&k, indexRegType, Mpgetfix(k.Val.U.(*Mpint))-Mpgetfix(i.Val.U.(*Mpint)))
+					Nodconst(&k, indexRegType, k.Int64()-i.Int64())
 					if Debug_slice > 0 {
-						Warn("slice: result cap == %d", Mpgetfix(k.Val.U.(*Mpint)))
+						Warn("slice: result cap == %d", k.Int64())
 					}
 					break
 				}
@@ -3429,7 +3459,7 @@ func cgen_slice(n, res *Node, wb bool) {
 						Warn("slice: result cap == 0")
 					}
 				} else if i.Op == OLITERAL {
-					v := Mpgetfix(i.Val.U.(*Mpint))
+					v := i.Int64()
 					if v != 0 {
 						ginscon(Thearch.Optoas(OSUB, indexRegType), v, &k)
 					}
@@ -3486,7 +3516,13 @@ func cgen_slice(n, res *Node, wb bool) {
 			Cgenr(n.Left, &xbase, nil)
 			Cgen_checknil(&xbase)
 		} else {
-			regalloc(&xbase, Ptrto(res.Type.Type), nil)
+			var ptr *Type
+			if n.Op == OSLICESTR {
+				ptr = ptrToUint8
+			} else {
+				ptr = Ptrto(n.Type.Elem())
+			}
+			regalloc(&xbase, ptr, nil)
 			x.Type = xbase.Type
 			Thearch.Gmove(&x, &xbase)
 			Regfree(&x)
@@ -3509,10 +3545,10 @@ func cgen_slice(n, res *Node, wb bool) {
 			if n.Op == OSLICESTR {
 				w = 1 // res is string, elem size is 1 (byte)
 			} else {
-				w = res.Type.Type.Width // res is []T, elem size is T.width
+				w = res.Type.Elem().Width // res is []T, elem size is T.width
 			}
 			if Isconst(&i, CTINT) {
-				ginscon(Thearch.Optoas(OADD, xbase.Type), Mpgetfix(i.Val.U.(*Mpint))*w, &xbase)
+				ginscon(Thearch.Optoas(OADD, xbase.Type), i.Int64()*w, &xbase)
 			} else if Thearch.AddIndex != nil && Thearch.AddIndex(&i, w, &xbase) {
 				// done by back end
 			} else if w == 1 {

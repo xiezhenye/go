@@ -8,7 +8,7 @@
 //	Portions Copyright © 2004,2006 Bruce Ellis
 //	Portions Copyright © 2005-2007 C H Forsyth (forsyth@terzarima.net)
 //	Revisions Copyright © 2000-2007 Lucent Technologies Inc. and others
-//	Portions Copyright © 2009 The Go Authors.  All rights reserved.
+//	Portions Copyright © 2009 The Go Authors. All rights reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -33,6 +33,7 @@ package gc
 import (
 	"bytes"
 	"cmd/internal/obj"
+	"cmd/internal/sys"
 	"fmt"
 	"sort"
 	"strings"
@@ -48,7 +49,7 @@ type Var struct {
 	width      int
 	id         int // index in vars
 	name       int8
-	etype      int8
+	etype      EType
 	addr       int8
 }
 
@@ -170,7 +171,7 @@ func setaddrs(bit Bits) {
 
 	for bany(&bit) {
 		// convert each bit to a variable
-		i = bnum(bit)
+		i = bnum(&bit)
 
 		node = vars[i].node
 		n = int(vars[i].name)
@@ -201,7 +202,7 @@ func walkvardef(n *Node, f *Flow, active int) {
 		if f1.Prog.As == obj.AVARKILL && f1.Prog.To.Node == n {
 			break
 		}
-		for v, _ = n.Opt.(*Var); v != nil; v = v.nextinnode {
+		for v, _ = n.Opt().(*Var); v != nil; v = v.nextinnode {
 			bn = v.id
 			biset(&(f1.Data.(*Reg)).act, uint(bn))
 		}
@@ -218,10 +219,8 @@ func walkvardef(n *Node, f *Flow, active int) {
 	}
 }
 
-/*
- * add mov b,rn
- * just after r
- */
+// add mov b,rn
+// just after r
 func addmove(r *Flow, bn int, rn int, f int) {
 	p1 := Ctxt.NewProg()
 	Clearp(p1)
@@ -248,11 +247,11 @@ func addmove(r *Flow, bn int, rn int, f int) {
 	else if(a->sym == nil)
 		a->type = TYPE_CONST;
 	*/
-	p1.As = int16(Thearch.Optoas(OAS, Types[uint8(v.etype)]))
+	p1.As = Thearch.Optoas(OAS, Types[uint8(v.etype)])
 
 	// TODO(rsc): Remove special case here.
-	if (Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9') && v.etype == TBOOL {
-		p1.As = int16(Thearch.Optoas(OAS, Types[TUINT8]))
+	if Thearch.LinkArch.InFamily(sys.MIPS64, sys.ARM, sys.ARM64, sys.PPC64) && v.etype == TBOOL {
+		p1.As = Thearch.Optoas(OAS, Types[TUINT8])
 	}
 	p1.From.Type = obj.TYPE_REG
 	p1.From.Reg = int16(rn)
@@ -282,9 +281,7 @@ func overlap_reg(o1 int64, w1 int, o2 int64, w2 int) bool {
 }
 
 func mkvar(f *Flow, a *obj.Addr) Bits {
-	/*
-	 * mark registers used
-	 */
+	// mark registers used
 	if a.Type == obj.TYPE_NONE {
 		return zbits
 	}
@@ -306,7 +303,7 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 		// TODO(rsc): Remove special case here.
 	case obj.TYPE_ADDR:
 		var bit Bits
-		if Thearch.Thechar == '5' || Thearch.Thechar == '7' || Thearch.Thechar == '9' {
+		if Thearch.LinkArch.InFamily(sys.MIPS64, sys.ARM, sys.ARM64, sys.PPC64) {
 			goto memcase
 		}
 		a.Type = obj.TYPE_MEM
@@ -351,16 +348,16 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	}
 	node = node.Orig
 	if node.Orig != node {
-		Fatal("%v: bad node", Ctxt.Dconv(a))
+		Fatalf("%v: bad node", Ctxt.Dconv(a))
 	}
 	if node.Sym == nil || node.Sym.Name[0] == '.' {
 		return zbits
 	}
-	et := int(a.Etype)
+	et := EType(a.Etype)
 	o := a.Offset
 	w := a.Width
 	if w < 0 {
-		Fatal("bad width %d for %v", w, Ctxt.Dconv(a))
+		Fatalf("bad width %d for %v", w, Ctxt.Dconv(a))
 	}
 
 	flag := 0
@@ -369,10 +366,10 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 		v = &vars[i]
 		if v.node == node && int(v.name) == n {
 			if v.offset == o {
-				if int(v.etype) == et {
+				if v.etype == et {
 					if int64(v.width) == w {
 						// TODO(rsc): Remove special case for arm here.
-						if flag == 0 || Thearch.Thechar != '5' {
+						if flag == 0 || Thearch.LinkArch.Family != sys.ARM {
 							return blsh(uint(i))
 						}
 					}
@@ -396,10 +393,10 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 
 	if nvar >= NVAR {
 		if Debug['w'] > 1 && node != nil {
-			Fatal("variable not optimized: %v", Nconv(node, obj.FmtSharp))
+			Fatalf("variable not optimized: %v", Nconv(node, FmtSharp))
 		}
 		if Debug['v'] > 0 {
-			Warn("variable not optimized: %v", Nconv(node, obj.FmtSharp))
+			Warn("variable not optimized: %v", Nconv(node, FmtSharp))
 		}
 
 		// If we're not tracking a word in a variable, mark the rest as
@@ -423,7 +420,7 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	v.id = i
 	v.offset = o
 	v.name = int8(n)
-	v.etype = int8(et)
+	v.etype = et
 	v.width = int(w)
 	v.addr = int8(flag) // funny punning
 	v.node = node
@@ -432,9 +429,9 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	// of Vars within the given Node, so that
 	// we can start at a Var and find all the other
 	// Vars in the same Go variable.
-	v.nextinnode, _ = node.Opt.(*Var)
+	v.nextinnode, _ = node.Opt().(*Var)
 
-	node.Opt = v
+	node.SetOpt(v)
 
 	bit := blsh(uint(i))
 	if n == obj.NAME_EXTERN || n == obj.NAME_STATIC {
@@ -460,7 +457,7 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	}
 
 	// Treat values with their address taken as live at calls,
-	// because the garbage collector's liveness analysis in ../gc/plive.c does.
+	// because the garbage collector's liveness analysis in plive.go does.
 	// These must be consistent or else we will elide stores and the garbage
 	// collector will see uninitialized data.
 	// The typical case where our own analysis is out of sync is when the
@@ -473,7 +470,7 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	// sets addrtaken, even though it ends up not being actually shared.
 	// If we were better about _ elision, _ = &x would suffice too.
 	// The broader := in a closure problem is mentioned in a comment in
-	// closure.c:/^typecheckclosure and dcl.c:/^oldname.
+	// closure.go:/^typecheckclosure and dcl.go:/^oldname.
 	if node.Addrtaken {
 		v.addr = 1
 	}
@@ -486,12 +483,12 @@ func mkvar(f *Flow, a *obj.Addr) Bits {
 	//
 	// Disable registerization for results if using defer, because the deferred func
 	// might recover and return, causing the current values to be used.
-	if node.Class == PEXTERN || (Hasdefer != 0 && node.Class == PPARAMOUT) {
+	if node.Class == PEXTERN || (hasdefer && node.Class == PPARAMOUT) {
 		v.addr = 1
 	}
 
 	if Debug['R'] != 0 {
-		fmt.Printf("bit=%2d et=%v w=%d+%d %v %v flag=%d\n", i, Econv(int(et), 0), o, w, Nconv(node, obj.FmtSharp), Ctxt.Dconv(a), v.addr)
+		fmt.Printf("bit=%2d et=%v w=%d+%d %v %v flag=%d\n", i, et, o, w, Nconv(node, FmtSharp), Ctxt.Dconv(a), v.addr)
 	}
 	Ostats.Nvar++
 
@@ -563,7 +560,7 @@ func prop(f *Flow, ref Bits, cal Bits) {
 						continue
 					}
 					v = &vars[z*64+i]
-					if v.node.Opt == nil { // v represents fixed register, not Go variable
+					if v.node.Opt() == nil { // v represents fixed register, not Go variable
 						continue
 					}
 
@@ -577,7 +574,7 @@ func prop(f *Flow, ref Bits, cal Bits) {
 					// To avoid the quadratic behavior, we only turn on the bits if
 					// v is the head of the list or if the head's bit is not yet turned on.
 					// This will set the bits at most twice, keeping the overall loop linear.
-					v1, _ = v.node.Opt.(*Var)
+					v1, _ = v.node.Opt().(*Var)
 
 					if v == v1 || !btest(&cal, uint(v1.id)) {
 						for ; v1 != nil; v1 = v1.nextinnode {
@@ -655,7 +652,7 @@ func allreg(b uint64, r *Rgn) uint64 {
 	r.regno = 0
 	switch v.etype {
 	default:
-		Fatal("unknown etype %d/%v", Bitno(b), Econv(int(v.etype), 0))
+		Fatalf("unknown etype %d/%v", Bitno(b), v.etype)
 
 	case TINT8,
 		TUINT8,
@@ -1036,11 +1033,9 @@ func Dumpit(str string, r0 *Flow, isreg int) {
 func regopt(firstp *obj.Prog) {
 	mergetemp(firstp)
 
-	/*
-	 * control flow is more complicated in generated go code
-	 * than in generated c code.  define pseudo-variables for
-	 * registers, so we have complete register usage information.
-	 */
+	// control flow is more complicated in generated go code
+	// than in generated c code.  define pseudo-variables for
+	// registers, so we have complete register usage information.
 	var nreg int
 	regnames := Thearch.Regnames(&nreg)
 
@@ -1063,16 +1058,14 @@ func regopt(firstp *obj.Prog) {
 	ivar = zbits
 	ovar = zbits
 
-	/*
-	 * pass 1
-	 * build aux data structure
-	 * allocate pcs
-	 * find use and set of variables
-	 */
+	// pass 1
+	// build aux data structure
+	// allocate pcs
+	// find use and set of variables
 	g := Flowstart(firstp, func() interface{} { return new(Reg) })
 	if g == nil {
 		for i := 0; i < nvar; i++ {
-			vars[i].node.Opt = nil
+			vars[i].node.SetOpt(nil)
 		}
 		return
 	}
@@ -1081,6 +1074,9 @@ func regopt(firstp *obj.Prog) {
 
 	for f := firstf; f != nil; f = f.Link {
 		p := f.Prog
+		// AVARLIVE must be considered a use, do not skip it.
+		// Otherwise the variable will be optimized away,
+		// and the whole point of AVARLIVE is to keep it on the stack.
 		if p.As == obj.AVARDEF || p.As == obj.AVARKILL {
 			continue
 		}
@@ -1119,8 +1115,8 @@ func regopt(firstp *obj.Prog) {
 
 		// Currently we never generate three register forms.
 		// If we do, this will need to change.
-		if p.From3.Type != obj.TYPE_NONE {
-			Fatal("regopt not implemented for from3")
+		if p.From3Type() != obj.TYPE_NONE && p.From3Type() != obj.TYPE_CONST {
+			Fatalf("regopt not implemented for from3")
 		}
 
 		bit = mkvar(f, &p.To)
@@ -1151,7 +1147,7 @@ func regopt(firstp *obj.Prog) {
 		}
 
 		if Debug['R'] != 0 && Debug['v'] != 0 {
-			fmt.Printf("bit=%2d addr=%d et=%v w=%-2d s=%v + %d\n", i, v.addr, Econv(int(v.etype), 0), v.width, v.node, v.offset)
+			fmt.Printf("bit=%2d addr=%d et=%v w=%-2d s=%v + %d\n", i, v.addr, v.etype, v.width, v.node, v.offset)
 		}
 	}
 
@@ -1159,23 +1155,19 @@ func regopt(firstp *obj.Prog) {
 		Dumpit("pass1", firstf, 1)
 	}
 
-	/*
-	 * pass 2
-	 * find looping structure
-	 */
+	// pass 2
+	// find looping structure
 	flowrpo(g)
 
 	if Debug['R'] != 0 && Debug['v'] != 0 {
 		Dumpit("pass2", firstf, 1)
 	}
 
-	/*
-	 * pass 2.5
-	 * iterate propagating fat vardef covering forward
-	 * r->act records vars with a VARDEF since the last CALL.
-	 * (r->act will be reused in pass 5 for something else,
-	 * but we'll be done with it by then.)
-	 */
+	// pass 2.5
+	// iterate propagating fat vardef covering forward
+	// r->act records vars with a VARDEF since the last CALL.
+	// (r->act will be reused in pass 5 for something else,
+	// but we'll be done with it by then.)
 	active := 0
 
 	for f := firstf; f != nil; f = f.Link {
@@ -1186,17 +1178,15 @@ func regopt(firstp *obj.Prog) {
 
 	for f := firstf; f != nil; f = f.Link {
 		p := f.Prog
-		if p.As == obj.AVARDEF && Isfat(((p.To.Node).(*Node)).Type) && ((p.To.Node).(*Node)).Opt != nil {
+		if p.As == obj.AVARDEF && Isfat(((p.To.Node).(*Node)).Type) && ((p.To.Node).(*Node)).Opt() != nil {
 			active++
 			walkvardef(p.To.Node.(*Node), f, active)
 		}
 	}
 
-	/*
-	 * pass 3
-	 * iterate propagating usage
-	 * 	back until flow graph is complete
-	 */
+	// pass 3
+	// iterate propagating usage
+	// 	back until flow graph is complete
 	var f1 *Flow
 	var i int
 	var f *Flow
@@ -1212,7 +1202,7 @@ loop1:
 		}
 	}
 
-	/* pick up unreachable code */
+	// pick up unreachable code
 loop11:
 	i = 0
 
@@ -1235,11 +1225,9 @@ loop11:
 		Dumpit("pass3", firstf, 1)
 	}
 
-	/*
-	 * pass 4
-	 * iterate propagating register/variable synchrony
-	 * 	forward until graph is complete
-	 */
+	// pass 4
+	// iterate propagating register/variable synchrony
+	// 	forward until graph is complete
 loop2:
 	change = 0
 
@@ -1255,10 +1243,8 @@ loop2:
 		Dumpit("pass4", firstf, 1)
 	}
 
-	/*
-	 * pass 4.5
-	 * move register pseudo-variables into regu.
-	 */
+	// pass 4.5
+	// move register pseudo-variables into regu.
 	mask := uint64((1 << uint(nreg)) - 1)
 	for f := firstf; f != nil; f = f.Link {
 		r := f.Data.(*Reg)
@@ -1278,23 +1264,21 @@ loop2:
 		Dumpit("pass4.5", firstf, 1)
 	}
 
-	/*
-	 * pass 5
-	 * isolate regions
-	 * calculate costs (paint1)
-	 */
+	// pass 5
+	// isolate regions
+	// calculate costs (paint1)
 	var bit Bits
 	if f := firstf; f != nil {
 		r := f.Data.(*Reg)
 		for z := 0; z < BITS; z++ {
 			bit.b[z] = (r.refahead.b[z] | r.calahead.b[z]) &^ (externs.b[z] | params.b[z] | addrs.b[z] | consts.b[z])
 		}
-		if bany(&bit) && f.Refset == 0 {
+		if bany(&bit) && !f.Refset {
 			// should never happen - all variables are preset
 			if Debug['w'] != 0 {
 				fmt.Printf("%v: used and not set: %v\n", f.Prog.Line(), &bit)
 			}
-			f.Refset = 1
+			f.Refset = true
 		}
 	}
 
@@ -1303,17 +1287,16 @@ loop2:
 	}
 	nregion = 0
 	region = region[:0]
-	var rgp *Rgn
 	for f := firstf; f != nil; f = f.Link {
 		r := f.Data.(*Reg)
 		for z := 0; z < BITS; z++ {
 			bit.b[z] = r.set.b[z] &^ (r.refahead.b[z] | r.calahead.b[z] | addrs.b[z])
 		}
-		if bany(&bit) && f.Refset == 0 {
+		if bany(&bit) && !f.Refset {
 			if Debug['w'] != 0 {
 				fmt.Printf("%v: set and not used: %v\n", f.Prog.Line(), &bit)
 			}
-			f.Refset = 1
+			f.Refset = true
 			Thearch.Excise(f)
 		}
 
@@ -1321,7 +1304,7 @@ loop2:
 			bit.b[z] = LOAD(r, z) &^ (r.act.b[z] | addrs.b[z])
 		}
 		for bany(&bit) {
-			i = bnum(bit)
+			i = bnum(&bit)
 			change = 0
 			paint1(f, i)
 			biclr(&bit, uint(i))
@@ -1342,7 +1325,7 @@ loop2:
 		}
 	}
 
-	if false && Debug['v'] != 0 && strings.Contains(Curfn.Nname.Sym.Name, "Parse") {
+	if false && Debug['v'] != 0 && strings.Contains(Curfn.Func.Nname.Sym.Name, "Parse") {
 		Warn("regions: %d\n", nregion)
 	}
 	if nregion >= MaxRgn {
@@ -1358,39 +1341,33 @@ loop2:
 		Dumpit("pass5", firstf, 1)
 	}
 
-	/*
-	 * pass 6
-	 * determine used registers (paint2)
-	 * replace code (paint3)
-	 */
+	// pass 6
+	// determine used registers (paint2)
+	// replace code (paint3)
 	if Debug['R'] != 0 && Debug['v'] != 0 {
 		fmt.Printf("\nregisterizing\n")
 	}
-	var usedreg uint64
-	var vreg uint64
 	for i := 0; i < nregion; i++ {
-		rgp = &region[i]
+		rgp := &region[i]
 		if Debug['R'] != 0 && Debug['v'] != 0 {
 			fmt.Printf("region %d: cost %d varno %d enter %d\n", i, rgp.cost, rgp.varno, rgp.enter.Prog.Pc)
 		}
 		bit = blsh(uint(rgp.varno))
-		usedreg = paint2(rgp.enter, int(rgp.varno), 0)
-		vreg = allreg(usedreg, rgp)
+		usedreg := paint2(rgp.enter, int(rgp.varno), 0)
+		vreg := allreg(usedreg, rgp)
 		if rgp.regno != 0 {
 			if Debug['R'] != 0 && Debug['v'] != 0 {
 				v := &vars[rgp.varno]
-				fmt.Printf("registerize %v+%d (bit=%2d et=%v) in %v usedreg=%#x vreg=%#x\n", v.node, v.offset, rgp.varno, Econv(int(v.etype), 0), obj.Rconv(int(rgp.regno)), usedreg, vreg)
+				fmt.Printf("registerize %v+%d (bit=%2d et=%v) in %v usedreg=%#x vreg=%#x\n", v.node, v.offset, rgp.varno, v.etype, obj.Rconv(int(rgp.regno)), usedreg, vreg)
 			}
 
 			paint3(rgp.enter, int(rgp.varno), vreg, int(rgp.regno))
 		}
 	}
 
-	/*
-	 * free aux structures. peep allocates new ones.
-	 */
+	// free aux structures. peep allocates new ones.
 	for i := 0; i < nvar; i++ {
-		vars[i].node.Opt = nil
+		vars[i].node.SetOpt(nil)
 	}
 	Flowend(g)
 	firstf = nil
@@ -1404,17 +1381,13 @@ loop2:
 		firstf = nil
 	}
 
-	/*
-	 * pass 7
-	 * peep-hole on basic block
-	 */
+	// pass 7
+	// peep-hole on basic block
 	if Debug['R'] == 0 || Debug['P'] != 0 {
 		Thearch.Peep(firstp)
 	}
 
-	/*
-	 * eliminate nops
-	 */
+	// eliminate nops
 	for p := firstp; p != nil; p = p.Link {
 		for p.Link != nil && p.Link.As == obj.ANOP {
 			p.Link = p.Link.Link
@@ -1465,14 +1438,14 @@ func bany(a *Bits) bool {
 }
 
 // bnum reports the lowest index of a 1 bit in a.
-func bnum(a Bits) int {
+func bnum(a *Bits) int {
 	for i, x := range &a.b { // & to avoid making a copy of a.b
 		if x != 0 {
 			return 64*i + Bitno(x)
 		}
 	}
 
-	Fatal("bad in bnum")
+	Fatalf("bad in bnum")
 	return 0
 }
 
@@ -1499,10 +1472,10 @@ func biclr(a *Bits, n uint) {
 }
 
 // Bitno reports the lowest index of a 1 bit in b.
-// It calls Fatal if there is no 1 bit.
+// It calls Fatalf if there is no 1 bit.
 func Bitno(b uint64) int {
 	if b == 0 {
-		Fatal("bad in bitno")
+		Fatalf("bad in bitno")
 	}
 	n := 0
 	if b&(1<<32-1) == 0 {
@@ -1541,7 +1514,7 @@ func (bits Bits) String() string {
 	var buf bytes.Buffer
 	sep := ""
 	for bany(&bits) {
-		i := bnum(bits)
+		i := bnum(&bits)
 		buf.WriteString(sep)
 		sep = " "
 		v := &vars[i]
@@ -1550,7 +1523,7 @@ func (bits Bits) String() string {
 		} else {
 			fmt.Fprintf(&buf, "%s(%d)", v.node.Sym.Name, i)
 			if v.offset != 0 {
-				fmt.Fprintf(&buf, "%+d", int64(v.offset))
+				fmt.Fprintf(&buf, "%+d", v.offset)
 			}
 		}
 		biclr(&bits, uint(i))

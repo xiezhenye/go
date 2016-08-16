@@ -17,6 +17,7 @@ import (
 
 func setArch(goarch string) (*arch.Arch, *obj.Link) {
 	os.Setenv("GOOS", "linux") // obj can handle this OS for all architectures.
+	os.Setenv("GOARCH", goarch)
 	architecture := arch.Set(goarch)
 	if architecture == nil {
 		panic("asm: unrecognized architecture " + goarch)
@@ -63,6 +64,16 @@ func TestARM64OperandParser(t *testing.T) {
 func TestPPC64OperandParser(t *testing.T) {
 	parser := newParser("ppc64")
 	testOperandParser(t, parser, ppc64OperandTests)
+}
+
+func TestMIPS64OperandParser(t *testing.T) {
+	parser := newParser("mips64")
+	testOperandParser(t, parser, mips64OperandTests)
+}
+
+func TestS390XOperandParser(t *testing.T) {
+	parser := newParser("s390x")
+	testOperandParser(t, parser, s390xOperandTests)
 }
 
 type operandTest struct {
@@ -122,6 +133,9 @@ var amd64OperandTests = []operandTest{
 	{"(SI)(BX*1)", "(SI)(BX*1)"},
 	{"(SI)(DX*1)", "(SI)(DX*1)"},
 	{"(SP)", "(SP)"},
+	{"(SP)(AX*4)", "(SP)(AX*4)"},
+	{"32(SP)(BX*2)", "32(SP)(BX*2)"},
+	{"32323(SP)(R8*4)", "32323(SP)(R8*4)"},
 	{"+3(PC)", "3(PC)"},
 	{"-1(DI)(BX*1)", "-1(DI)(BX*1)"},
 	{"-3(PC)", "-3(PC)"},
@@ -181,8 +195,9 @@ var amd64OperandTests = []operandTest{
 	{"x·y+8(SB)", "x.y+8(SB)"},
 	{"x·y+8(SP)", "x.y+8(SP)"},
 	{"y+56(FP)", "y+56(FP)"},
-	{"·AddUint32(SB", "\"\".AddUint32(SB)"},
+	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
 	{"·callReflect(SB)", "\"\".callReflect(SB)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
 }
 
 var x86OperandTests = []operandTest{
@@ -240,6 +255,7 @@ var x86OperandTests = []operandTest{
 	{"x+4(FP)", "x+4(FP)"},
 	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
 	{"·reflectcall(SB)", "\"\".reflectcall(SB)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
 }
 
 var armOperandTests = []operandTest{
@@ -288,6 +304,10 @@ var armOperandTests = []operandTest{
 	{"runtime·_sfloat2(SB)", "runtime._sfloat2(SB)"},
 	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
 	{"(R1, R3)", "(R1, R3)"},
+	{"[R0,R1,g,R15", ""}, // Issue 11764 - asm hung parsing ']' missing register lists.
+	{"[):[o-FP", ""},     // Issue 12469 - there was no infinite loop for ARM; these are just sanity checks.
+	{"[):[R0-FP", ""},
+	{"(", ""}, // Issue 12466 - backed up before beginning of line.
 }
 
 var ppc64OperandTests = []operandTest{
@@ -377,6 +397,7 @@ var ppc64OperandTests = []operandTest{
 	{"runtime·abort(SB)", "runtime.abort(SB)"},
 	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
 	{"·trunc(SB)", "\"\".trunc(SB)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
 }
 
 var arm64OperandTests = []operandTest{
@@ -426,4 +447,186 @@ var arm64OperandTests = []operandTest{
 	{"ZR", "ZR"},
 	{"(ZR)", "(ZR)"},
 	{"(R29, RSP)", "(R29, RSP)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
+}
+
+var mips64OperandTests = []operandTest{
+	{"$((1<<63)-1)", "$9223372036854775807"},
+	{"$(-64*1024)", "$-65536"},
+	{"$(1024 * 8)", "$8192"},
+	{"$-1", "$-1"},
+	{"$-24(R4)", "$-24(R4)"},
+	{"$0", "$0"},
+	{"$0(R1)", "$(R1)"},
+	{"$0.5", "$(0.5)"},
+	{"$0x7000", "$28672"},
+	{"$0x88888eef", "$2290650863"},
+	{"$1", "$1"},
+	{"$_main<>(SB)", "$_main<>(SB)"},
+	{"$argframe(FP)", "$argframe(FP)"},
+	{"$~3", "$-4"},
+	{"(-288-3*8)(R1)", "-312(R1)"},
+	{"(16)(R7)", "16(R7)"},
+	{"(8)(g)", "8(g)"},
+	{"(R0)", "(R0)"},
+	{"(R3)", "(R3)"},
+	{"(R4)", "(R4)"},
+	{"(R5)", "(R5)"},
+	{"-1(R4)", "-1(R4)"},
+	{"-1(R5)", "-1(R5)"},
+	{"6(PC)", "6(PC)"},
+	{"F14", "F14"},
+	{"F15", "F15"},
+	{"F16", "F16"},
+	{"F17", "F17"},
+	{"F18", "F18"},
+	{"F19", "F19"},
+	{"F20", "F20"},
+	{"F21", "F21"},
+	{"F22", "F22"},
+	{"F23", "F23"},
+	{"F24", "F24"},
+	{"F25", "F25"},
+	{"F26", "F26"},
+	{"F27", "F27"},
+	{"F28", "F28"},
+	{"F29", "F29"},
+	{"F30", "F30"},
+	{"F31", "F31"},
+	{"R0", "R0"},
+	{"R1", "R1"},
+	{"R11", "R11"},
+	{"R12", "R12"},
+	{"R13", "R13"},
+	{"R14", "R14"},
+	{"R15", "R15"},
+	{"R16", "R16"},
+	{"R17", "R17"},
+	{"R18", "R18"},
+	{"R19", "R19"},
+	{"R2", "R2"},
+	{"R20", "R20"},
+	{"R21", "R21"},
+	{"R22", "R22"},
+	{"R23", "R23"},
+	{"R24", "R24"},
+	{"R25", "R25"},
+	{"R26", "R26"},
+	{"R27", "R27"},
+	{"R29", "R29"},
+	{"R3", "R3"},
+	{"R31", "R31"},
+	{"R4", "R4"},
+	{"R5", "R5"},
+	{"R6", "R6"},
+	{"R7", "R7"},
+	{"R8", "R8"},
+	{"R9", "R9"},
+	{"LO", "LO"},
+	{"a(FP)", "a(FP)"},
+	{"g", "g"},
+	{"RSB", "RSB"},
+	{"ret+8(FP)", "ret+8(FP)"},
+	{"runtime·abort(SB)", "runtime.abort(SB)"},
+	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
+	{"·trunc(SB)", "\"\".trunc(SB)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
+}
+
+var s390xOperandTests = []operandTest{
+	{"$((1<<63)-1)", "$9223372036854775807"},
+	{"$(-64*1024)", "$-65536"},
+	{"$(1024 * 8)", "$8192"},
+	{"$-1", "$-1"},
+	{"$-24(R4)", "$-24(R4)"},
+	{"$0", "$0"},
+	{"$0(R1)", "$(R1)"},
+	{"$0.5", "$(0.5)"},
+	{"$0x7000", "$28672"},
+	{"$0x88888eef", "$2290650863"},
+	{"$1", "$1"},
+	{"$_main<>(SB)", "$_main<>(SB)"},
+	{"$argframe(FP)", "$argframe(FP)"},
+	{"$~3", "$-4"},
+	{"(-288-3*8)(R1)", "-312(R1)"},
+	{"(16)(R7)", "16(R7)"},
+	{"(8)(g)", "8(g)"},
+	{"(R0)", "(R0)"},
+	{"(R3)", "(R3)"},
+	{"(R4)", "(R4)"},
+	{"(R5)", "(R5)"},
+	{"-1(R4)", "-1(R4)"},
+	{"-1(R5)", "-1(R5)"},
+	{"6(PC)", "6(PC)"},
+	{"R0", "R0"},
+	{"R1", "R1"},
+	{"R2", "R2"},
+	{"R3", "R3"},
+	{"R4", "R4"},
+	{"R5", "R5"},
+	{"R6", "R6"},
+	{"R7", "R7"},
+	{"R8", "R8"},
+	{"R9", "R9"},
+	{"R10", "R10"},
+	{"R11", "R11"},
+	{"R12", "R12"},
+	// {"R13", "R13"}, R13 is g
+	{"R14", "R14"},
+	{"R15", "R15"},
+	{"F0", "F0"},
+	{"F1", "F1"},
+	{"F2", "F2"},
+	{"F3", "F3"},
+	{"F4", "F4"},
+	{"F5", "F5"},
+	{"F6", "F6"},
+	{"F7", "F7"},
+	{"F8", "F8"},
+	{"F9", "F9"},
+	{"F10", "F10"},
+	{"F11", "F11"},
+	{"F12", "F12"},
+	{"F13", "F13"},
+	{"F14", "F14"},
+	{"F15", "F15"},
+	{"V0", "V0"},
+	{"V1", "V1"},
+	{"V2", "V2"},
+	{"V3", "V3"},
+	{"V4", "V4"},
+	{"V5", "V5"},
+	{"V6", "V6"},
+	{"V7", "V7"},
+	{"V8", "V8"},
+	{"V9", "V9"},
+	{"V10", "V10"},
+	{"V11", "V11"},
+	{"V12", "V12"},
+	{"V13", "V13"},
+	{"V14", "V14"},
+	{"V15", "V15"},
+	{"V16", "V16"},
+	{"V17", "V17"},
+	{"V18", "V18"},
+	{"V19", "V19"},
+	{"V20", "V20"},
+	{"V21", "V21"},
+	{"V22", "V22"},
+	{"V23", "V23"},
+	{"V24", "V24"},
+	{"V25", "V25"},
+	{"V26", "V26"},
+	{"V27", "V27"},
+	{"V28", "V28"},
+	{"V29", "V29"},
+	{"V30", "V30"},
+	{"V31", "V31"},
+	{"a(FP)", "a(FP)"},
+	{"g", "g"},
+	{"ret+8(FP)", "ret+8(FP)"},
+	{"runtime·abort(SB)", "runtime.abort(SB)"},
+	{"·AddUint32(SB)", "\"\".AddUint32(SB)"},
+	{"·trunc(SB)", "\"\".trunc(SB)"},
+	{"[):[o-FP", ""}, // Issue 12469 - asm hung parsing the o-FP range on non ARM platforms.
 }

@@ -2,20 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// Portable half of code generator; mainly statements and control flow.
+
 package gc
 
 import (
 	"cmd/internal/obj"
+	"cmd/internal/sys"
 	"fmt"
 )
 
-/*
- * portable half of code generator.
- * mainly statements and control flow.
- */
-var labellist *Label
-
-var lastlabel *Label
+// TODO: labellist should become part of a "compilation state" for functions.
+var labellist []*Label
 
 func Sysfunc(name string) *Node {
 	n := newname(Pkglookup(name, Runtimepkg))
@@ -45,49 +43,38 @@ func addrescapes(n *Node) {
 			break
 		}
 
-		switch n.Class {
-		case PPARAMREF:
-			addrescapes(n.Defn)
-
-		// if func param, need separate temporary
-		// to hold heap pointer.
-		// the function type has already been checked
-		// (we're in the function body)
-		// so the param already has a valid xoffset.
-
-		// expression to refer to stack copy
-		case PPARAM, PPARAMOUT:
-			n.Stackparam = Nod(OPARAM, n, nil)
-
-			n.Stackparam.Type = n.Type
-			n.Stackparam.Addable = true
-			if n.Xoffset == BADWIDTH {
-				Fatal("addrescapes before param assignment")
-			}
-			n.Stackparam.Xoffset = n.Xoffset
-			fallthrough
-
-		case PAUTO:
-			n.Class |= PHEAP
-
-			n.Addable = false
-			n.Ullman = 2
-			n.Xoffset = 0
-
-			// create stack variable to hold pointer to heap
-			oldfn := Curfn
-
-			Curfn = n.Curfn
-			n.Name.Heapaddr = temp(Ptrto(n.Type))
-			buf := fmt.Sprintf("&%v", n.Sym)
-			n.Name.Heapaddr.Sym = Lookup(buf)
-			n.Name.Heapaddr.Orig.Sym = n.Name.Heapaddr.Sym
-			n.Esc = EscHeap
-			if Debug['m'] != 0 {
-				fmt.Printf("%v: moved to heap: %v\n", n.Line(), n)
-			}
-			Curfn = oldfn
+		// If a closure reference escapes, mark the outer variable as escaping.
+		if n.isClosureVar() {
+			addrescapes(n.Name.Defn)
+			break
 		}
+
+		if n.Class != PPARAM && n.Class != PPARAMOUT && n.Class != PAUTO {
+			break
+		}
+
+		// This is a plain parameter or local variable that needs to move to the heap,
+		// but possibly for the function outside the one we're compiling.
+		// That is, if we have:
+		//
+		//	func f(x int) {
+		//		func() {
+		//			global = &x
+		//		}
+		//	}
+		//
+		// then we're analyzing the inner closure but we need to move x to the
+		// heap in f, not in the inner closure. Flip over to f before calling moveToHeap.
+		oldfn := Curfn
+		Curfn = n.Name.Curfn
+		if Curfn.Func.Closure != nil && Curfn.Op == OCLOSURE {
+			Curfn = Curfn.Func.Closure
+		}
+		ln := lineno
+		lineno = Curfn.Lineno
+		moveToHeap(n)
+		Curfn = oldfn
+		lineno = ln
 
 	case OIND, ODOTPTR:
 		break
@@ -98,19 +85,129 @@ func addrescapes(n *Node) {
 	// escape--the pointer inside x does, but that
 	// is always a heap pointer anyway.
 	case ODOT, OINDEX, OPAREN, OCONVNOP:
-		if !Isslice(n.Left.Type) {
+		if !n.Left.Type.IsSlice() {
 			addrescapes(n.Left)
 		}
 	}
 }
 
-func clearlabels() {
-	for l := labellist; l != nil; l = l.Link {
-		l.Sym.Label = nil
+// isParamStackCopy reports whether this is the on-stack copy of a
+// function parameter that moved to the heap.
+func (n *Node) isParamStackCopy() bool {
+	return n.Op == ONAME && (n.Class == PPARAM || n.Class == PPARAMOUT) && n.Name.Heapaddr != nil
+}
+
+// isParamHeapCopy reports whether this is the on-heap copy of
+// a function parameter that moved to the heap.
+func (n *Node) isParamHeapCopy() bool {
+	return n.Op == ONAME && n.Class == PAUTOHEAP && n.Name.Param.Stackcopy != nil
+}
+
+// paramClass reports the parameter class (PPARAM or PPARAMOUT)
+// of the node, which may be an unmoved on-stack parameter
+// or the on-heap or on-stack copy of a parameter that moved to the heap.
+// If the node is not a parameter, paramClass returns Pxxx.
+func (n *Node) paramClass() Class {
+	if n.Op != ONAME {
+		return Pxxx
+	}
+	if n.Class == PPARAM || n.Class == PPARAMOUT {
+		return n.Class
+	}
+	if n.isParamHeapCopy() {
+		return n.Name.Param.Stackcopy.Class
+	}
+	return Pxxx
+}
+
+// moveToHeap records the parameter or local variable n as moved to the heap.
+func moveToHeap(n *Node) {
+	if Debug['r'] != 0 {
+		Dump("MOVE", n)
+	}
+	if compiling_runtime {
+		Yyerror("%v escapes to heap, not allowed in runtime.", n)
+	}
+	if n.Class == PAUTOHEAP {
+		Dump("n", n)
+		Fatalf("double move to heap")
 	}
 
-	labellist = nil
-	lastlabel = nil
+	// Allocate a local stack variable to hold the pointer to the heap copy.
+	// temp will add it to the function declaration list automatically.
+	heapaddr := temp(Ptrto(n.Type))
+	heapaddr.Sym = Lookup("&" + n.Sym.Name)
+	heapaddr.Orig.Sym = heapaddr.Sym
+
+	// Parameters have a local stack copy used at function start/end
+	// in addition to the copy in the heap that may live longer than
+	// the function.
+	if n.Class == PPARAM || n.Class == PPARAMOUT {
+		if n.Xoffset == BADWIDTH {
+			Fatalf("addrescapes before param assignment")
+		}
+
+		// We rewrite n below to be a heap variable (indirection of heapaddr).
+		// Preserve a copy so we can still write code referring to the original,
+		// and substitute that copy into the function declaration list
+		// so that analyses of the local (on-stack) variables use it.
+		stackcopy := Nod(ONAME, nil, nil)
+		stackcopy.Sym = n.Sym
+		stackcopy.Type = n.Type
+		stackcopy.Xoffset = n.Xoffset
+		stackcopy.Class = n.Class
+		stackcopy.Name.Heapaddr = heapaddr
+		if n.Class == PPARAM {
+			stackcopy.SetNotLiveAtEnd(true)
+		}
+		if n.Class == PPARAMOUT {
+			// Make sure the pointer to the heap copy is kept live throughout the function.
+			// The function could panic at any point, and then a defer could recover.
+			// Thus, we need the pointer to the heap copy always available so the
+			// post-deferreturn code can copy the return value back to the stack.
+			// See issue 16095.
+			heapaddr.setIsOutputParamHeapAddr(true)
+		}
+		n.Name.Param.Stackcopy = stackcopy
+
+		// Substitute the stackcopy into the function variable list so that
+		// liveness and other analyses use the underlying stack slot
+		// and not the now-pseudo-variable n.
+		found := false
+		for i, d := range Curfn.Func.Dcl {
+			if d == n {
+				Curfn.Func.Dcl[i] = stackcopy
+				found = true
+				break
+			}
+			// Parameters are before locals, so can stop early.
+			// This limits the search even in functions with many local variables.
+			if d.Class == PAUTO {
+				break
+			}
+		}
+		if !found {
+			Fatalf("cannot find %v in local variable list", n)
+		}
+		Curfn.Func.Dcl = append(Curfn.Func.Dcl, n)
+	}
+
+	// Modify n in place so that uses of n now mean indirection of the heapaddr.
+	n.Class = PAUTOHEAP
+	n.Ullman = 2
+	n.Xoffset = 0
+	n.Name.Heapaddr = heapaddr
+	n.Esc = EscHeap
+	if Debug['m'] != 0 {
+		fmt.Printf("%v: moved to heap: %v\n", n.Line(), n)
+	}
+}
+
+func clearlabels() {
+	for _, l := range labellist {
+		l.Sym.Label = nil
+	}
+	labellist = labellist[:0]
 }
 
 func newlab(n *Node) *Label {
@@ -118,14 +215,9 @@ func newlab(n *Node) *Label {
 	lab := s.Label
 	if lab == nil {
 		lab = new(Label)
-		if lastlabel == nil {
-			labellist = lab
-		} else {
-			lastlabel.Link = lab
-		}
-		lastlabel = lab
 		lab.Sym = s
 		s.Label = lab
+		labellist = append(labellist, lab)
 	}
 
 	if n.Op == OLABEL {
@@ -135,12 +227,14 @@ func newlab(n *Node) *Label {
 			lab.Def = n
 		}
 	} else {
-		lab.Use = list(lab.Use, n)
+		lab.Use = append(lab.Use, n)
 	}
 
 	return lab
 }
 
+// There is a copy of checkgoto in the new SSA backend.
+// Please keep them in sync.
 func checkgoto(from *Node, to *Node) {
 	if from.Sym == to.Sym {
 		return
@@ -159,7 +253,7 @@ func checkgoto(from *Node, to *Node) {
 		fs = fs.Link
 	}
 	if fs != to.Sym {
-		lno := int(lineno)
+		lno := lineno
 		setlineno(from)
 
 		// decide what to complain about.
@@ -189,11 +283,11 @@ func checkgoto(from *Node, to *Node) {
 		}
 
 		if block != nil {
-			Yyerror("goto %v jumps into block starting at %v", from.Left.Sym, Ctxt.Line(int(block.Lastlineno)))
+			Yyerror("goto %v jumps into block starting at %v", from.Left.Sym, linestr(block.Lastlineno))
 		} else {
-			Yyerror("goto %v jumps over declaration of %v at %v", from.Left.Sym, dcl, Ctxt.Line(int(dcl.Lastlineno)))
+			Yyerror("goto %v jumps over declaration of %v at %v", from.Left.Sym, dcl, linestr(dcl.Lastlineno))
 		}
-		lineno = int32(lno)
+		lineno = lno
 	}
 }
 
@@ -202,7 +296,7 @@ func stmtlabel(n *Node) *Label {
 		lab := n.Sym.Label
 		if lab != nil {
 			if lab.Def != nil {
-				if lab.Def.Defn == n {
+				if lab.Def.Name.Defn == n {
 					return lab
 				}
 			}
@@ -211,22 +305,18 @@ func stmtlabel(n *Node) *Label {
 	return nil
 }
 
-/*
- * compile statements
- */
-func Genlist(l *NodeList) {
-	for ; l != nil; l = l.Next {
-		gen(l.N)
+// compile statements
+func Genlist(l Nodes) {
+	for _, n := range l.Slice() {
+		gen(n)
 	}
 }
 
-/*
- * generate code to start new proc running call n.
- */
+// generate code to start new proc running call n.
 func cgen_proc(n *Node, proc int) {
 	switch n.Left.Op {
 	default:
-		Fatal("cgen_proc: unknown call %v", Oconv(int(n.Left.Op), 0))
+		Fatalf("cgen_proc: unknown call %v", n.Left.Op)
 
 	case OCALLMETH:
 		cgen_callmeth(n.Left, proc)
@@ -239,35 +329,24 @@ func cgen_proc(n *Node, proc int) {
 	}
 }
 
-/*
- * generate declaration.
- * have to allocate heap copy
- * for escaped variables.
- */
+// generate declaration.
+// have to allocate heap copy
+// for escaped variables.
 func cgen_dcl(n *Node) {
 	if Debug['g'] != 0 {
 		Dump("\ncgen-dcl", n)
 	}
 	if n.Op != ONAME {
 		Dump("cgen_dcl", n)
-		Fatal("cgen_dcl")
+		Fatalf("cgen_dcl")
 	}
 
-	if n.Class&PHEAP == 0 {
-		return
+	if n.Class == PAUTOHEAP {
+		Fatalf("cgen_dcl %v", n)
 	}
-	if compiling_runtime != 0 {
-		Yyerror("%v escapes to heap, not allowed in runtime.", n)
-	}
-	if n.Alloc == nil {
-		n.Alloc = callnew(n.Type)
-	}
-	Cgen_as(n.Name.Heapaddr, n.Alloc)
 }
 
-/*
- * generate discard of value
- */
+// generate discard of value
 func cgen_discard(nr *Node) {
 	if nr == nil {
 		return
@@ -275,7 +354,7 @@ func cgen_discard(nr *Node) {
 
 	switch nr.Op {
 	case ONAME:
-		if nr.Class&PHEAP == 0 && nr.Class != PEXTERN && nr.Class != PFUNC && nr.Class != PPARAMREF {
+		if nr.Class != PAUTOHEAP && nr.Class != PEXTERN && nr.Class != PFUNC {
 			gused(nr)
 		}
 
@@ -322,9 +401,7 @@ func cgen_discard(nr *Node) {
 	}
 }
 
-/*
- * clearslim generates code to zero a slim node.
- */
+// clearslim generates code to zero a slim node.
 func Clearslim(n *Node) {
 	var z Node
 	z.Op = OLITERAL
@@ -333,22 +410,20 @@ func Clearslim(n *Node) {
 
 	switch Simtype[n.Type.Etype] {
 	case TCOMPLEX64, TCOMPLEX128:
-		z.Val.U = new(Mpcplx)
-		Mpmovecflt(&z.Val.U.(*Mpcplx).Real, 0.0)
-		Mpmovecflt(&z.Val.U.(*Mpcplx).Imag, 0.0)
+		z.SetVal(Val{new(Mpcplx)})
+		z.Val().U.(*Mpcplx).Real.SetFloat64(0.0)
+		z.Val().U.(*Mpcplx).Imag.SetFloat64(0.0)
 
 	case TFLOAT32, TFLOAT64:
 		var zero Mpflt
-		Mpmovecflt(&zero, 0.0)
-		z.Val.Ctype = CTFLT
-		z.Val.U = &zero
+		zero.SetFloat64(0.0)
+		z.SetVal(Val{&zero})
 
 	case TPTR32, TPTR64, TCHAN, TMAP:
-		z.Val.Ctype = CTNIL
+		z.SetVal(Val{new(NilVal)})
 
 	case TBOOL:
-		z.Val.Ctype = CTBOOL
-		z.Val.U = false
+		z.SetVal(Val{false})
 
 	case TINT8,
 		TINT16,
@@ -358,29 +433,24 @@ func Clearslim(n *Node) {
 		TUINT16,
 		TUINT32,
 		TUINT64:
-		z.Val.Ctype = CTINT
-		z.Val.U = new(Mpint)
-		Mpmovecfix(z.Val.U.(*Mpint), 0)
+		z.SetVal(Val{new(Mpint)})
+		z.Val().U.(*Mpint).SetInt64(0)
 
 	default:
-		Fatal("clearslim called on type %v", n.Type)
+		Fatalf("clearslim called on type %v", n.Type)
 	}
 
 	ullmancalc(&z)
 	Cgen(&z, n)
 }
 
-/*
- * generate:
- *	res = iface{typ, data}
- * n->left is typ
- * n->right is data
- */
+// generate:
+//	res = iface{typ, data}
+// n->left is typ
+// n->right is data
 func Cgen_eface(n *Node, res *Node) {
-	/*
-	 * the right node of an eface may contain function calls that uses res as an argument,
-	 * so it's important that it is done first
-	 */
+	// the right node of an eface may contain function calls that uses res as an argument,
+	// so it's important that it is done first
 
 	tmp := temp(Types[Tptr])
 	Cgen(n.Right, tmp)
@@ -396,13 +466,11 @@ func Cgen_eface(n *Node, res *Node) {
 	Cgen(n.Left, &dst)
 }
 
-/*
- * generate one of:
- *	res, resok = x.(T)
- *	res = x.(T) (when resok == nil)
- * n.Left is x
- * n.Type is T
- */
+// generate one of:
+//	res, resok = x.(T)
+//	res = x.(T) (when resok == nil)
+// n.Left is x
+// n.Type is T
 func cgen_dottype(n *Node, res, resok *Node, wb bool) {
 	if Debug_typeassert > 0 {
 		Warn("type assertion inlined")
@@ -427,7 +495,7 @@ func cgen_dottype(n *Node, res, resok *Node, wb bool) {
 	Regalloc(&r1, byteptr, nil)
 	iface.Type = byteptr
 	Cgen(&iface, &r1)
-	if !isnilinter(n.Left.Type) {
+	if !n.Left.Type.IsEmptyInterface() {
 		// Holding itab, want concrete type in second word.
 		p := Thearch.Ginscmp(OEQ, byteptr, &r1, Nodintconst(0), -1)
 		r2 = r1
@@ -450,13 +518,13 @@ func cgen_dottype(n *Node, res, resok *Node, wb bool) {
 		q := Gbranch(obj.AJMP, nil, 0)
 		Patch(p, Pc)
 		Regrealloc(&r2) // reclaim from above, for this failure path
-		fn := syslook("panicdottype", 0)
+		fn := syslook("panicdottype")
 		dowidth(fn.Type)
 		call := Nod(OCALLFUNC, fn, nil)
 		r1.Type = byteptr
 		r2.Type = byteptr
-		call.List = list(list(list1(&r1), &r2), typename(n.Left.Type))
-		call.List = ascompatte(OCALLFUNC, call, false, getinarg(fn.Type), call.List, 0, nil)
+		call.List.Set([]*Node{&r1, &r2, typename(n.Left.Type)})
+		call.List.Set(ascompatte(OCALLFUNC, call, false, fn.Type.Params(), call.List.Slice(), 0, nil))
 		gen(call)
 		Regfree(&r1)
 		Regfree(&r2)
@@ -488,12 +556,10 @@ func cgen_dottype(n *Node, res, resok *Node, wb bool) {
 	}
 }
 
-/*
- * generate:
- *	res, resok = x.(T)
- * n.Left is x
- * n.Type is T
- */
+// generate:
+//	res, resok = x.(T)
+// n.Left is x
+// n.Type is T
 func Cgen_As2dottype(n, res, resok *Node) {
 	if Debug_typeassert > 0 {
 		Warn("type assertion inlined")
@@ -518,7 +584,7 @@ func Cgen_As2dottype(n, res, resok *Node) {
 	Regalloc(&r1, byteptr, res)
 	iface.Type = byteptr
 	Cgen(&iface, &r1)
-	if !isnilinter(n.Left.Type) {
+	if !n.Left.Type.IsEmptyInterface() {
 		// Holding itab, want concrete type in second word.
 		p := Thearch.Ginscmp(OEQ, byteptr, &r1, Nodintconst(0), -1)
 		r2 = r1
@@ -540,11 +606,11 @@ func Cgen_As2dottype(n, res, resok *Node) {
 	q := Gbranch(obj.AJMP, nil, 0)
 	Patch(p, Pc)
 
-	fn := syslook("panicdottype", 0)
+	fn := syslook("panicdottype")
 	dowidth(fn.Type)
 	call := Nod(OCALLFUNC, fn, nil)
-	call.List = list(list(list1(&r1), &r2), typename(n.Left.Type))
-	call.List = ascompatte(OCALLFUNC, call, false, getinarg(fn.Type), call.List, 0, nil)
+	call.List.Set([]*Node{&r1, &r2, typename(n.Left.Type)})
+	call.List.Set(ascompatte(OCALLFUNC, call, false, fn.Type.Params(), call.List.Slice(), 0, nil))
 	gen(call)
 	Regfree(&r1)
 	Regfree(&r2)
@@ -552,11 +618,9 @@ func Cgen_As2dottype(n, res, resok *Node) {
 	Patch(q, Pc)
 }
 
-/*
- * gather series of offsets
- * >=0 is direct addressed field
- * <0 is pointer to next field (+1)
- */
+// gather series of offsets
+// >=0 is direct addressed field
+// <0 is pointer to next field (+1)
 func Dotoffset(n *Node, oary []int64, nn **Node) int {
 	var i int
 
@@ -564,7 +628,7 @@ func Dotoffset(n *Node, oary []int64, nn **Node) int {
 	case ODOT:
 		if n.Xoffset == BADWIDTH {
 			Dump("bad width in dotoffset", n)
-			Fatal("bad width in dotoffset")
+			Fatalf("bad width in dotoffset")
 		}
 
 		i = Dotoffset(n.Left, oary, nn)
@@ -585,7 +649,7 @@ func Dotoffset(n *Node, oary []int64, nn **Node) int {
 	case ODOTPTR:
 		if n.Xoffset == BADWIDTH {
 			Dump("bad width in dotoffset", n)
-			Fatal("bad width in dotoffset")
+			Fatalf("bad width in dotoffset")
 		}
 
 		i = Dotoffset(n.Left, oary, nn)
@@ -605,12 +669,14 @@ func Dotoffset(n *Node, oary []int64, nn **Node) int {
 	return i
 }
 
-/*
- * make a new off the books
- */
+// make a new off the books
 func Tempname(nn *Node, t *Type) {
 	if Curfn == nil {
-		Fatal("no curfn for tempname")
+		Fatalf("no curfn for tempname")
+	}
+	if Curfn.Func.Closure != nil && Curfn.Op == OCLOSURE {
+		Dump("Tempname", Curfn)
+		Fatalf("adding tempname to wrong closure function")
 	}
 
 	if t == nil {
@@ -620,7 +686,7 @@ func Tempname(nn *Node, t *Type) {
 
 	// give each tmp a different name so that there
 	// a chance to registerizer them
-	s := Lookupf("autotmp_%.4d", statuniqgen)
+	s := LookupN("autotmp_", statuniqgen)
 	statuniqgen++
 	n := Nod(ONAME, nil, nil)
 	n.Sym = s
@@ -630,8 +696,8 @@ func Tempname(nn *Node, t *Type) {
 	n.Addable = true
 	n.Ullman = 1
 	n.Esc = EscNever
-	n.Curfn = Curfn
-	Curfn.Func.Dcl = list(Curfn.Func.Dcl, n)
+	n.Name.Curfn = Curfn
+	Curfn.Func.Dcl = append(Curfn.Func.Dcl, n)
 
 	dowidth(t)
 	n.Xoffset = 0
@@ -639,8 +705,8 @@ func Tempname(nn *Node, t *Type) {
 }
 
 func temp(t *Type) *Node {
-	n := Nod(OXXX, nil, nil)
-	Tempname(n, t)
+	var n Node
+	Tempname(&n, t)
 	n.Sym.Def.Used = true
 	return n.Orig
 }
@@ -656,7 +722,7 @@ func gen(n *Node) {
 		goto ret
 	}
 
-	if n.Ninit != nil {
+	if n.Ninit.Len() > 0 {
 		Genlist(n.Ninit)
 	}
 
@@ -664,7 +730,7 @@ func gen(n *Node) {
 
 	switch n.Op {
 	default:
-		Fatal("gen: unknown op %v", Nconv(n, obj.FmtShort|obj.FmtSign))
+		Fatalf("gen: unknown op %v", Nconv(n, FmtShort|FmtSign))
 
 	case OCASE,
 		OFALL,
@@ -700,11 +766,11 @@ func gen(n *Node) {
 			lab.Labelpc = Pc
 		}
 
-		if n.Defn != nil {
-			switch n.Defn.Op {
+		if n.Name.Defn != nil {
+			switch n.Name.Defn.Op {
 			// so stmtlabel can find the label
 			case OFOR, OSWITCH, OSELECT:
-				n.Defn.Sym = lab.Sym
+				n.Name.Defn.Sym = lab.Sym
 			}
 		}
 
@@ -732,7 +798,7 @@ func gen(n *Node) {
 				break
 			}
 
-			lab.Used = 1
+			lab.Used = true
 			if lab.Breakpc == nil {
 				Yyerror("invalid break label %v", n.Left.Sym)
 				break
@@ -757,7 +823,7 @@ func gen(n *Node) {
 				break
 			}
 
-			lab.Used = 1
+			lab.Used = true
 			if lab.Continpc == nil {
 				Yyerror("invalid continue label %v", n.Left.Sym)
 				break
@@ -788,10 +854,10 @@ func gen(n *Node) {
 			lab.Continpc = continpc
 		}
 
-		gen(n.Nincr)                      // contin:	incr
-		Patch(p1, Pc)                     // test:
-		Bgen(n.Ntest, false, -1, breakpc) //		if(!test) goto break
-		Genlist(n.Nbody)                  //		body
+		gen(n.Right)                     // contin:	incr
+		Patch(p1, Pc)                    // test:
+		Bgen(n.Left, false, -1, breakpc) //		if(!test) goto break
+		Genlist(n.Nbody)                 //		body
 		gjmp(continpc)
 		Patch(breakpc, Pc) // done:
 		continpc = scontin
@@ -802,15 +868,15 @@ func gen(n *Node) {
 		}
 
 	case OIF:
-		p1 := gjmp(nil)                          //		goto test
-		p2 := gjmp(nil)                          // p2:		goto else
-		Patch(p1, Pc)                            // test:
-		Bgen(n.Ntest, false, int(-n.Likely), p2) //		if(!test) goto p2
-		Genlist(n.Nbody)                         //		then
-		p3 := gjmp(nil)                          //		goto done
-		Patch(p2, Pc)                            // else:
-		Genlist(n.Nelse)                         //		else
-		Patch(p3, Pc)                            // done:
+		p1 := gjmp(nil)                         //		goto test
+		p2 := gjmp(nil)                         // p2:		goto else
+		Patch(p1, Pc)                           // test:
+		Bgen(n.Left, false, int(-n.Likely), p2) //		if(!test) goto p2
+		Genlist(n.Nbody)                        //		then
+		p3 := gjmp(nil)                         //		goto done
+		Patch(p2, Pc)                           // else:
+		Genlist(n.Rlist)                        //		else
+		Patch(p3, Pc)                           // done:
 
 	case OSWITCH:
 		sbreak := breakpc
@@ -854,7 +920,7 @@ func gen(n *Node) {
 		cgen_dcl(n.Left)
 
 	case OAS:
-		if gen_as_init(n) {
+		if gen_as_init(n, false) {
 			break
 		}
 		Cgen_as(n.Left, n.Right)
@@ -863,7 +929,7 @@ func gen(n *Node) {
 		Cgen_as_wb(n.Left, n.Right, true)
 
 	case OAS2DOTTYPE:
-		cgen_dottype(n.Rlist.N, n.List.N, n.List.Next.N, false)
+		cgen_dottype(n.Rlist.First(), n.List.First(), n.List.Second(), needwritebarrier(n.List.First(), n.Rlist.First()))
 
 	case OCALLMETH:
 		cgen_callmeth(n, 0)
@@ -894,13 +960,16 @@ func gen(n *Node) {
 		Cgen_checknil(n.Left)
 
 	case OVARKILL:
-		gvarkill(n.Left)
+		Gvarkill(n.Left)
+
+	case OVARLIVE:
+		Gvarlive(n.Left)
 	}
 
 ret:
 	if Anyregalloc() != wasregalloc {
 		Dump("node", n)
-		Fatal("registers left allocated")
+		Fatalf("registers left allocated")
 	}
 
 	lineno = lno
@@ -930,11 +999,6 @@ func Cgen_as_wb(nl, nr *Node, wb bool) {
 	}
 
 	if nr == nil || iszero(nr) {
-		// heaps should already be clear
-		if nr == nil && (nl.Class&PHEAP != 0) {
-			return
-		}
-
 		tl := nl.Type
 		if tl == nil {
 			return
@@ -966,12 +1030,12 @@ func cgen_callmeth(n *Node, proc int) {
 	l := n.Left
 
 	if l.Op != ODOTMETH {
-		Fatal("cgen_callmeth: not dotmethod: %v", l)
+		Fatalf("cgen_callmeth: not dotmethod: %v", l)
 	}
 
 	n2 := *n
 	n2.Op = OCALLFUNC
-	n2.Left = l.Right
+	n2.Left = newname(l.Sym)
 	n2.Left.Type = l.Type
 
 	if n2.Left.Op == ONAME {
@@ -989,26 +1053,24 @@ func CgenTemp(n *Node) *Node {
 }
 
 func checklabels() {
-	var l *NodeList
-
-	for lab := labellist; lab != nil; lab = lab.Link {
+	for _, lab := range labellist {
 		if lab.Def == nil {
-			for l = lab.Use; l != nil; l = l.Next {
-				yyerrorl(int(l.N.Lineno), "label %v not defined", lab.Sym)
+			for _, n := range lab.Use {
+				yyerrorl(n.Lineno, "label %v not defined", lab.Sym)
 			}
 			continue
 		}
 
-		if lab.Use == nil && lab.Used == 0 {
-			yyerrorl(int(lab.Def.Lineno), "label %v defined and not used", lab.Sym)
+		if lab.Use == nil && !lab.Used {
+			yyerrorl(lab.Def.Lineno, "label %v defined and not used", lab.Sym)
 			continue
 		}
 
 		if lab.Gotopc != nil {
-			Fatal("label %v never resolved", lab.Sym)
+			Fatalf("label %v never resolved", lab.Sym)
 		}
-		for l = lab.Use; l != nil; l = l.Next {
-			checkgoto(l.N, lab.Def)
+		for _, n := range lab.Use {
+			checkgoto(n, lab.Def)
 		}
 	}
 }
@@ -1041,7 +1103,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 	numPtr := 0
 	visitComponents(nl.Type, 0, func(t *Type, offset int64) bool {
 		n++
-		if int(Simtype[t.Etype]) == Tptr && t != itable {
+		if Simtype[t.Etype] == Tptr && t != itable {
 			numPtr++
 		}
 		return n <= maxMoves && (!wb || numPtr <= 1)
@@ -1055,7 +1117,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 		// Emit vardef if needed.
 		if nl.Op == ONAME {
 			switch nl.Type.Etype {
-			case TARRAY, TSTRING, TINTER, TSTRUCT:
+			case TARRAY, TSLICE, TSTRING, TINTER, TSTRUCT:
 				Gvardef(nl)
 			}
 		}
@@ -1103,7 +1165,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 			nodl.Type = t
 			nodl.Xoffset = lbase + offset
 			nodr.Type = t
-			if Isfloat[t.Etype] {
+			if t.IsFloat() {
 				// TODO(rsc): Cache zero register like we do for integers?
 				Clearslim(&nodl)
 			} else {
@@ -1122,7 +1184,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 		nodl.Type = Ptrto(Types[TUINT8])
 		Regalloc(&nodr, Types[Tptr], nil)
 		p := Thearch.Gins(Thearch.Optoas(OAS, Types[Tptr]), nil, &nodr)
-		Datastring(nr.Val.U.(string), &p.From)
+		Datastring(nr.Val().U.(string), &p.From)
 		p.From.Type = obj.TYPE_ADDR
 		Thearch.Gmove(&nodr, &nodl)
 		Regfree(&nodr)
@@ -1130,7 +1192,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 		// length
 		nodl.Type = Types[Simtype[TUINT]]
 		nodl.Xoffset += int64(Array_nel) - int64(Array_array)
-		Nodconst(&nodr, nodl.Type, int64(len(nr.Val.U.(string))))
+		Nodconst(&nodr, nodl.Type, int64(len(nr.Val().U.(string))))
 		Thearch.Gmove(&nodr, &nodl)
 		return true
 	}
@@ -1139,7 +1201,7 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 	nodr = *nr
 	if !cadable(nr) {
 		if nr.Ullman >= UINF && nodl.Op == OINDREG {
-			Fatal("miscompile")
+			Fatalf("miscompile")
 		}
 		Igen(nr, &nodr, nil)
 		defer Regfree(&nodr)
@@ -1158,9 +1220,9 @@ func componentgen_wb(nr, nl *Node, wb bool) bool {
 		ptrOffset int64
 	)
 	visitComponents(nl.Type, 0, func(t *Type, offset int64) bool {
-		if wb && int(Simtype[t.Etype]) == Tptr && t != itable {
+		if wb && Simtype[t.Etype] == Tptr && t != itable {
 			if ptrType != nil {
-				Fatal("componentgen_wb %v", Tconv(nl.Type, 0))
+				Fatalf("componentgen_wb %v", Tconv(nl.Type, 0))
 			}
 			ptrType = t
 			ptrOffset = offset
@@ -1199,8 +1261,8 @@ func visitComponents(t *Type, startOffset int64, f func(elem *Type, elemOffset i
 		}
 		// NOTE: Assuming little endian (signed top half at offset 4).
 		// We don't have any 32-bit big-endian systems.
-		if Thearch.Thechar != '5' && Thearch.Thechar != '8' {
-			Fatal("unknown 32-bit architecture")
+		if !Thearch.LinkArch.InFamily(sys.ARM, sys.I386) {
+			Fatalf("unknown 32-bit architecture")
 		}
 		return f(Types[TUINT32], startOffset) &&
 			f(Types[TINT32], startOffset+4)
@@ -1223,48 +1285,32 @@ func visitComponents(t *Type, startOffset int64, f func(elem *Type, elemOffset i
 	case TINTER:
 		return f(itable, startOffset) &&
 			f(Ptrto(Types[TUINT8]), startOffset+int64(Widthptr))
-		return true
 
 	case TSTRING:
 		return f(Ptrto(Types[TUINT8]), startOffset) &&
 			f(Types[Simtype[TUINT]], startOffset+int64(Widthptr))
 
-	case TARRAY:
-		if Isslice(t) {
-			return f(Ptrto(t.Type), startOffset+int64(Array_array)) &&
-				f(Types[Simtype[TUINT]], startOffset+int64(Array_nel)) &&
-				f(Types[Simtype[TUINT]], startOffset+int64(Array_cap))
-		}
+	case TSLICE:
+		return f(Ptrto(t.Elem()), startOffset+int64(Array_array)) &&
+			f(Types[Simtype[TUINT]], startOffset+int64(Array_nel)) &&
+			f(Types[Simtype[TUINT]], startOffset+int64(Array_cap))
 
+	case TARRAY:
 		// Short-circuit [1e6]struct{}.
-		if t.Type.Width == 0 {
+		if t.Elem().Width == 0 {
 			return true
 		}
 
-		for i := int64(0); i < t.Bound; i++ {
-			if !visitComponents(t.Type, startOffset+i*t.Type.Width, f) {
+		for i := int64(0); i < t.NumElem(); i++ {
+			if !visitComponents(t.Elem(), startOffset+i*t.Elem().Width, f) {
 				return false
 			}
 		}
 		return true
 
 	case TSTRUCT:
-		if t.Type != nil && t.Type.Width != 0 {
-			// NOTE(rsc): If this happens, the right thing to do is to say
-			//	startOffset -= t.Type.Width
-			// but I want to see if it does.
-			// The old version of componentgen handled this,
-			// in code introduced in CL 6932045 to fix issue #4518.
-			// But the test case in issue 4518 does not trigger this anymore,
-			// so maybe this complication is no longer needed.
-			Fatal("struct not at offset 0")
-		}
-
-		for field := t.Type; field != nil; field = field.Down {
-			if field.Etype != TFIELD {
-				Fatal("bad struct")
-			}
-			if !visitComponents(field.Type, startOffset+field.Width, f) {
+		for _, field := range t.Fields().Slice() {
+			if !visitComponents(field.Type, startOffset+field.Offset, f) {
 				return false
 			}
 		}

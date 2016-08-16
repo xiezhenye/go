@@ -17,13 +17,13 @@ func ExampleFloat_Add() {
 	y.SetFloat64(2.718281828) // y is automatically set to 53bit precision
 	z.SetPrec(32)
 	z.Add(&x, &y)
-	fmt.Printf("x = %s (%s, prec = %d, acc = %s)\n", &x, x.Format('p', 0), x.Prec(), x.Acc())
-	fmt.Printf("y = %s (%s, prec = %d, acc = %s)\n", &y, y.Format('p', 0), y.Prec(), y.Acc())
-	fmt.Printf("z = %s (%s, prec = %d, acc = %s)\n", &z, z.Format('p', 0), z.Prec(), z.Acc())
+	fmt.Printf("x = %.10g (%s, prec = %d, acc = %s)\n", &x, x.Text('p', 0), x.Prec(), x.Acc())
+	fmt.Printf("y = %.10g (%s, prec = %d, acc = %s)\n", &y, y.Text('p', 0), y.Prec(), y.Acc())
+	fmt.Printf("z = %.10g (%s, prec = %d, acc = %s)\n", &z, z.Text('p', 0), z.Prec(), z.Acc())
 	// Output:
-	// x = 1000 (0x.fap10, prec = 64, acc = Exact)
-	// y = 2.718281828 (0x.adf85458248cd8p2, prec = 53, acc = Exact)
-	// z = 1002.718282 (0x.faadf854p10, prec = 32, acc = Below)
+	// x = 1000 (0x.fap+10, prec = 64, acc = Exact)
+	// y = 2.718281828 (0x.adf85458248cd8p+2, prec = 53, acc = Exact)
+	// z = 1002.718282 (0x.faadf854p+10, prec = 32, acc = Below)
 }
 
 func Example_Shift() {
@@ -59,7 +59,7 @@ func ExampleFloat_Cmp() {
 		x := big.NewFloat(x64)
 		for _, y64 := range operands {
 			y := big.NewFloat(y64)
-			fmt.Printf("%4s  %4s  %3d\n", x, y, x.Cmp(y))
+			fmt.Printf("%4g  %4g  %3d\n", x, y, x.Cmp(y))
 		}
 		fmt.Println()
 	}
@@ -108,4 +108,34 @@ func ExampleFloat_Cmp() {
 	// +Inf     0    1
 	// +Inf   1.2    1
 	// +Inf  +Inf    0
+}
+
+func ExampleRoundingMode() {
+	operands := []float64{2.6, 2.5, 2.1, -2.1, -2.5, -2.6}
+
+	fmt.Print("   x")
+	for mode := big.ToNearestEven; mode <= big.ToPositiveInf; mode++ {
+		fmt.Printf("  %s", mode)
+	}
+	fmt.Println()
+
+	for _, f64 := range operands {
+		fmt.Printf("%4g", f64)
+		for mode := big.ToNearestEven; mode <= big.ToPositiveInf; mode++ {
+			// sample operands above require 2 bits to represent mantissa
+			// set binary precision to 2 to round them to integer values
+			f := new(big.Float).SetPrec(2).SetMode(mode).SetFloat64(f64)
+			fmt.Printf("  %*g", len(mode.String()), f)
+		}
+		fmt.Println()
+	}
+
+	// Output:
+	//    x  ToNearestEven  ToNearestAway  ToZero  AwayFromZero  ToNegativeInf  ToPositiveInf
+	//  2.6              3              3       2             3              2              3
+	//  2.5              2              3       2             3              2              3
+	//  2.1              2              2       2             3              2              3
+	// -2.1             -2             -2      -2            -3             -3             -2
+	// -2.5             -2             -3      -2            -3             -3             -2
+	// -2.6             -3             -3      -2            -3             -3             -2
 }

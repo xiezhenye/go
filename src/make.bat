@@ -16,10 +16,10 @@
 ::
 :: GOOS: The target operating system for installed packages and tools.
 ::
-:: GO_GCFLAGS: Additional 5g/6g/8g arguments to use when
+:: GO_GCFLAGS: Additional go tool compile arguments to use when
 :: building the packages and commands.
 ::
-:: GO_LDFLAGS: Additional 5l/6l/8l arguments to use when
+:: GO_LDFLAGS: Additional go tool link arguments to use when
 :: building the commands.
 ::
 :: CGO_ENABLED: Controls cgo usage during the build. Set it to 1
@@ -31,6 +31,9 @@
 ::
 :: CC_FOR_TARGET: Command line to run compile C code for GOARCH.
 :: This is used by cgo. Default is CC.
+::
+:: FC: Command line to run to compile Fortran code.
+:: This is used by cgo. Default is "gfortran".
 
 @echo off
 
@@ -65,6 +68,7 @@ setlocal
 set GOROOT=%GOROOT_BOOTSTRAP%
 set GOOS=
 set GOARCH=
+set GOBIN=
 "%GOROOT_BOOTSTRAP%\bin\go" build -o cmd\dist\dist.exe .\cmd\dist
 endlocal
 if errorlevel 1 goto fail
