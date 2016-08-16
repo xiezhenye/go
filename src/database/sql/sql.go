@@ -1472,7 +1472,10 @@ func (s *Stmt) Exec(args ...interface{}) (Result, error) {
 
 	var res Result
 	maxBadConnRetries := s.db.getMaxBadConnRetries()
-	for i := 0; i < maxBadConnRetries+1; i++ {
+	if maxBadConnRetries < 1 {
+		maxBadConnRetries = 1
+	}
+	for i := 0; i < maxBadConnRetries; i++ {
 		dc, releaseConn, si, err := s.connStmt()
 		if err != nil {
 			if err == driver.ErrBadConn {
@@ -1614,7 +1617,10 @@ func (s *Stmt) Query(args ...interface{}) (*Rows, error) {
 
 	var rowsi driver.Rows
 	maxBadConnRetries := s.db.getMaxBadConnRetries()
-	for i := 0; i < maxBadConnRetries+1; i++ {
+	if maxBadConnRetries < 1 {
+		maxBadConnRetries = 1
+	}
+	for i := 0; i < maxBadConnRetries; i++ {
 		dc, releaseConn, si, err := s.connStmt()
 		if err != nil {
 			if err == driver.ErrBadConn {
