@@ -238,15 +238,15 @@ type DB struct {
 	// maybeOpenNewConnections sends on the chan (one send per needed connection)
 	// It is closed during db.Close(). The close tells the connectionOpener
 	// goroutine to exit.
-	openerCh    chan struct{}
-	closed      bool
-	dep         map[finalCloser]depSet
-	lastPut     map[*driverConn]string // stacktrace of last conn's put; debug only
-	maxIdle     int                    // zero means defaultMaxIdleConns; negative means 0
-	maxOpen     int                    // <= 0 means unlimited
+	openerCh          chan struct{}
+	closed            bool
+	dep               map[finalCloser]depSet
+	lastPut           map[*driverConn]string // stacktrace of last conn's put; debug only
+	maxIdle           int                    // zero means defaultMaxIdleConns; negative means 0
+	maxOpen           int                    // <= 0 means unlimited
 	maxBadConnRetries int                    // negative means 0
-	maxLifetime time.Duration          // maximum amount of time a connection may be reused
-	cleanerCh   chan struct{}
+	maxLifetime       time.Duration          // maximum amount of time a connection may be reused
+	cleanerCh         chan struct{}
 }
 
 // connReuseStrategy determines how (*DB).conn returns database connections.
@@ -630,6 +630,7 @@ func (db *DB) getMaxBadConnRetries() int {
 	ret := db.maxBadConnRetries
 	db.mu.Unlock()
 	return ret
+}
 
 // SetConnMaxLifetime sets the maximum amount of time a connection may be reused.
 //
