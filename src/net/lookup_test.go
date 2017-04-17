@@ -63,7 +63,7 @@ func TestLookupGoogleSRV(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -99,7 +99,7 @@ func TestLookupGmailMX(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -131,7 +131,7 @@ func TestLookupGmailNS(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -164,7 +164,7 @@ func TestLookupGmailTXT(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -199,7 +199,7 @@ func TestLookupGooglePublicDNSAddr(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !supportsIPv6 || !*testIPv4 || !*testIPv6 {
+	if !supportsIPv4() || !supportsIPv6() || !*testIPv4 || !*testIPv6 {
 		t.Skip("both IPv4 and IPv6 are required")
 	}
 
@@ -220,7 +220,7 @@ func TestLookupGooglePublicDNSAddr(t *testing.T) {
 }
 
 func TestLookupIPv6LinkLocalAddr(t *testing.T) {
-	if !supportsIPv6 || !*testIPv6 {
+	if !supportsIPv6() || !*testIPv6 {
 		t.Skip("IPv6 is required")
 	}
 
@@ -243,23 +243,24 @@ func TestLookupIPv6LinkLocalAddr(t *testing.T) {
 	}
 }
 
-var lookupIANACNAMETests = []struct {
+var lookupCNAMETests = []struct {
 	name, cname string
 }{
 	{"www.iana.org", "icann.org."},
 	{"www.iana.org.", "icann.org."},
+	{"www.google.com", "google.com."},
 }
 
-func TestLookupIANACNAME(t *testing.T) {
+func TestLookupCNAME(t *testing.T) {
 	if testenv.Builder() == "" {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
-	for _, tt := range lookupIANACNAMETests {
+	for _, tt := range lookupCNAMETests {
 		cname, err := LookupCNAME(tt.name)
 		if err != nil {
 			t.Fatal(err)
@@ -282,7 +283,7 @@ func TestLookupGoogleHost(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -314,7 +315,7 @@ func TestLookupGoogleIP(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -398,11 +399,11 @@ func TestDNSFlood(t *testing.T) {
 	for i := 0; i < N; i++ {
 		name := fmt.Sprintf("%d.net-test.golang.org", i)
 		go func() {
-			_, err := lookupIPContext(ctxHalfTimeout, name)
+			_, err := DefaultResolver.LookupIPAddr(ctxHalfTimeout, name)
 			c <- err
 		}()
 		go func() {
-			_, err := lookupIPContext(ctxTimeout, name)
+			_, err := DefaultResolver.LookupIPAddr(ctxTimeout, name)
 			c <- err
 		}()
 	}
@@ -449,7 +450,7 @@ func TestDNSFlood(t *testing.T) {
 }
 
 func TestLookupDotsWithLocalSource(t *testing.T) {
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -498,7 +499,7 @@ func TestLookupDotsWithRemoteSource(t *testing.T) {
 		testenv.MustHaveExternalNetwork(t)
 	}
 
-	if !supportsIPv4 || !*testIPv4 {
+	if !supportsIPv4() || !*testIPv4 {
 		t.Skip("IPv4 is required")
 	}
 
@@ -616,7 +617,7 @@ func srvString(srvs []*SRV) string {
 func TestLookupPort(t *testing.T) {
 	// See http://www.iana.org/assignments/service-names-port-numbers/service-names-port-numbers.xhtml
 	//
-	// Please be careful about adding new mappings for testings.
+	// Please be careful about adding new test cases.
 	// There are platforms having incomplete mappings for
 	// restricted resource access and security reasons.
 	type test struct {
@@ -648,8 +649,6 @@ func TestLookupPort(t *testing.T) {
 	}
 
 	switch runtime.GOOS {
-	case "nacl":
-		t.Skipf("not supported on %s", runtime.GOOS)
 	case "android":
 		if netGo {
 			t.Skipf("not supported on %s without cgo; see golang.org/issues/14576", runtime.GOOS)
@@ -668,5 +667,75 @@ func TestLookupPort(t *testing.T) {
 				t.Error(perr)
 			}
 		}
+	}
+}
+
+// Like TestLookupPort but with minimal tests that should always pass
+// because the answers are baked-in to the net package.
+func TestLookupPort_Minimal(t *testing.T) {
+	type test struct {
+		network string
+		name    string
+		port    int
+	}
+	var tests = []test{
+		{"tcp", "http", 80},
+		{"tcp", "HTTP", 80}, // case shouldn't matter
+		{"tcp", "https", 443},
+		{"tcp", "ssh", 22},
+		{"tcp", "gopher", 70},
+		{"tcp4", "http", 80},
+		{"tcp6", "http", 80},
+	}
+
+	for _, tt := range tests {
+		port, err := LookupPort(tt.network, tt.name)
+		if port != tt.port || err != nil {
+			t.Errorf("LookupPort(%q, %q) = %d, %v; want %d, error=nil", tt.network, tt.name, port, err, tt.port)
+		}
+	}
+}
+
+func TestLookupProtocol_Minimal(t *testing.T) {
+	type test struct {
+		name string
+		want int
+	}
+	var tests = []test{
+		{"tcp", 6},
+		{"TcP", 6}, // case shouldn't matter
+		{"icmp", 1},
+		{"igmp", 2},
+		{"udp", 17},
+		{"ipv6-icmp", 58},
+	}
+
+	for _, tt := range tests {
+		got, err := lookupProtocol(context.Background(), tt.name)
+		if got != tt.want || err != nil {
+			t.Errorf("LookupProtocol(%q) = %d, %v; want %d, error=nil", tt.name, got, err, tt.want)
+		}
+	}
+
+}
+
+func TestLookupNonLDH(t *testing.T) {
+	if runtime.GOOS == "nacl" {
+		t.Skip("skip on nacl")
+	}
+	if fixup := forceGoDNS(); fixup != nil {
+		defer fixup()
+	}
+
+	// "LDH" stands for letters, digits, and hyphens and is the usual
+	// description of standard DNS names.
+	// This test is checking that other kinds of names are reported
+	// as not found, not reported as invalid names.
+	addrs, err := LookupHost("!!!.###.bogus..domain.")
+	if err == nil {
+		t.Fatalf("lookup succeeded: %v", addrs)
+	}
+	if !strings.HasSuffix(err.Error(), errNoSuchHost.Error()) {
+		t.Fatalf("lookup error = %v, want %v", err, errNoSuchHost)
 	}
 }

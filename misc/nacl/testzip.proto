@@ -18,6 +18,10 @@ go	src=..
 					asm
 						testdata
 							+
+			compile
+				internal
+					syntax
+						parser.go
 			doc
 				main.go
 				pkg.go
@@ -33,6 +37,26 @@ go	src=..
 				testdata
 					+
 			vendor
+				github.com
+					google
+						pprof
+							internal
+								driver
+									testdata
+										+
+								graph
+									testdata
+										+
+								report
+									testdata
+										+
+							profile
+								testdata
+									+
+					ianlancetaylor
+						demangle
+							testdata
+								+
 				golang.org
 					x
 						arch
@@ -42,6 +66,10 @@ go	src=..
 										+
 							x86
 								x86asm
+									testdata
+										+
+							ppc64
+								ppc64asm
 									testdata
 										+
 		archive
@@ -134,6 +162,8 @@ go	src=..
 		regexp
 			testdata
 				+
+		runtime
+			textflag.h
 		strconv
 			testdata
 				+

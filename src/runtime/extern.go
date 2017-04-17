@@ -50,12 +50,10 @@ It is a comma-separated list of name=val pairs setting these named variables:
 	gcshrinkstackoff: setting gcshrinkstackoff=1 disables moving goroutines
 	onto smaller stacks. In this mode, a goroutine's stack can only grow.
 
-	gcstackbarrieroff: setting gcstackbarrieroff=1 disables the use of stack barriers
-	that allow the garbage collector to avoid repeating a stack scan during the
-	mark termination phase.
-
-	gcstackbarrierall: setting gcstackbarrierall=1 installs stack barriers
-	in every stack frame, rather than in exponentially-spaced frames.
+	gcrescanstacks: setting gcrescanstacks=1 enables stack
+	re-scanning during the STW mark termination phase. This is
+	helpful for debugging if objects are being prematurely
+	garbage collected.
 
 	gcstoptheworld: setting gcstoptheworld=1 disables concurrent garbage collection,
 	making every garbage collection a stop-the-world event. Setting gcstoptheworld=2
@@ -176,7 +174,7 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 		return
 	}
 	f := findfunc(rpc[1])
-	if f == nil {
+	if !f.valid() {
 		// TODO(rsc): Probably a bug?
 		// The C version said "have retpc at least"
 		// but actually returned pc=0.
@@ -189,7 +187,7 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 	// All architectures turn faults into apparent calls to sigpanic.
 	// If we see a call to sigpanic, we do not back up the PC to find
 	// the line number of the call instruction, because there is no call.
-	if xpc > f.entry && (g == nil || g.entry != funcPC(sigpanic)) {
+	if xpc > f.entry && (!g.valid() || g.entry != funcPC(sigpanic)) {
 		xpc--
 	}
 	file, line32 := funcline(f, xpc)
@@ -204,11 +202,13 @@ func Caller(skip int) (pc uintptr, file string, line int, ok bool) {
 // 1 identifying the caller of Callers.
 // It returns the number of entries written to pc.
 //
-// Note that since each slice entry pc[i] is a return program counter,
-// looking up the file and line for pc[i] (for example, using (*Func).FileLine)
-// will normally return the file and line number of the instruction immediately
-// following the call.
-// To easily look up file/line information for the call sequence, use Frames.
+// To translate these PCs into symbolic information such as function
+// names and line numbers, use CallersFrames. CallersFrames accounts
+// for inlined functions and adjusts the return program counters into
+// call program counters. Iterating over the returned slice of PCs
+// directly is discouraged, as is using FuncForPC on any of the
+// returned PCs, since these cannot account for inlining or return
+// program counter adjustment.
 func Callers(skip int, pc []uintptr) int {
 	// runtime.callers uses pc.array==nil as a signal
 	// to print a stack trace. Pick off 0-length pc here

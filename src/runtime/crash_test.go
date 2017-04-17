@@ -6,6 +6,7 @@ package runtime_test
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"internal/testenv"
 	"io/ioutil"
@@ -136,11 +137,10 @@ func buildTestProg(t *testing.T, binary string, flags ...string) (string, error)
 	}
 
 	exe := filepath.Join(testprog.dir, name+".exe")
-	cmd := exec.Command("go", append([]string{"build", "-o", exe}, flags...)...)
+	cmd := exec.Command(testenv.GoToolPath(t), append([]string{"build", "-o", exe}, flags...)...)
 	cmd.Dir = "testdata/" + binary
 	out, err := testEnv(cmd).CombinedOutput()
 	if err != nil {
-		exe = ""
 		target.err = fmt.Errorf("building %s %v: %v\n%s", binary, flags, err, out)
 		testprog.target[name] = target
 		return "", target.err
@@ -158,12 +158,18 @@ var (
 func checkStaleRuntime(t *testing.T) {
 	staleRuntimeOnce.Do(func() {
 		// 'go run' uses the installed copy of runtime.a, which may be out of date.
-		out, err := testEnv(exec.Command("go", "list", "-f", "{{.Stale}}", "runtime")).CombinedOutput()
+		out, err := testEnv(exec.Command(testenv.GoToolPath(t), "list", "-f", "{{.Stale}}", "runtime")).CombinedOutput()
 		if err != nil {
 			staleRuntimeErr = fmt.Errorf("failed to execute 'go list': %v\n%v", err, string(out))
 			return
 		}
 		if string(out) != "false\n" {
+			t.Logf("go list -f {{.Stale}} runtime:\n%s", out)
+			out, err := testEnv(exec.Command(testenv.GoToolPath(t), "list", "-f", "{{.StaleReason}}", "runtime")).CombinedOutput()
+			if err != nil {
+				t.Logf("go list -f {{.StaleReason}} failed: %v", err)
+			}
+			t.Logf("go list -f {{.StaleReason}} runtime:\n%s", out)
 			staleRuntimeErr = fmt.Errorf("Stale runtime.a. Run 'go install runtime'.")
 		}
 	})
@@ -401,6 +407,7 @@ func TestRecoverBeforePanicAfterGoexit(t *testing.T) {
 }
 
 func TestNetpollDeadlock(t *testing.T) {
+	t.Parallel()
 	output := runTestProg(t, "testprognet", "NetpollDeadlock")
 	want := "done\n"
 	if !strings.HasSuffix(output, want) {
@@ -409,6 +416,7 @@ func TestNetpollDeadlock(t *testing.T) {
 }
 
 func TestPanicTraceback(t *testing.T) {
+	t.Parallel()
 	output := runTestProg(t, "testprog", "PanicTraceback")
 	want := "panic: hello"
 	if !strings.HasPrefix(output, want) {
@@ -416,7 +424,7 @@ func TestPanicTraceback(t *testing.T) {
 	}
 
 	// Check functions in the traceback.
-	fns := []string{"panic", "main.pt1.func1", "panic", "main.pt2.func1", "panic", "main.pt2", "main.pt1"}
+	fns := []string{"main.pt1.func1", "panic", "main.pt2.func1", "panic", "main.pt2", "main.pt1"}
 	for _, fn := range fns {
 		re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(fn) + `\(.*\n`)
 		idx := re.FindStringIndex(output)
@@ -443,6 +451,13 @@ func TestPanicDeadlockSyscall(t *testing.T) {
 	testPanicDeadlock(t, "SyscallInPanic", "1\n2\npanic: 3\n\n")
 }
 
+func TestPanicLoop(t *testing.T) {
+	output := runTestProg(t, "testprog", "PanicLoop")
+	if want := "panic while printing panic value"; !strings.Contains(output, want) {
+		t.Errorf("output does not contain %q:\n%s", want, output)
+	}
+}
+
 func TestMemPprof(t *testing.T) {
 	testenv.MustHaveGoRun(t)
 
@@ -458,27 +473,96 @@ func TestMemPprof(t *testing.T) {
 	fn := strings.TrimSpace(string(got))
 	defer os.Remove(fn)
 
-	cmd := testEnv(exec.Command("go", "tool", "pprof", "-alloc_space", "-top", exe, fn))
+	for try := 0; try < 2; try++ {
+		cmd := testEnv(exec.Command(testenv.GoToolPath(t), "tool", "pprof", "-alloc_space", "-top"))
+		// Check that pprof works both with and without explicit executable on command line.
+		if try == 0 {
+			cmd.Args = append(cmd.Args, exe, fn)
+		} else {
+			cmd.Args = append(cmd.Args, fn)
+		}
+		found := false
+		for i, e := range cmd.Env {
+			if strings.HasPrefix(e, "PPROF_TMPDIR=") {
+				cmd.Env[i] = "PPROF_TMPDIR=" + os.TempDir()
+				found = true
+				break
+			}
+		}
+		if !found {
+			cmd.Env = append(cmd.Env, "PPROF_TMPDIR="+os.TempDir())
+		}
 
-	found := false
-	for i, e := range cmd.Env {
-		if strings.HasPrefix(e, "PPROF_TMPDIR=") {
-			cmd.Env[i] = "PPROF_TMPDIR=" + os.TempDir()
-			found = true
-			break
+		top, err := cmd.CombinedOutput()
+		t.Logf("%s:\n%s", cmd.Args, top)
+		if err != nil {
+			t.Error(err)
+		} else if !bytes.Contains(top, []byte("MemProf")) {
+			t.Error("missing MemProf in pprof output")
 		}
 	}
-	if !found {
-		cmd.Env = append(cmd.Env, "PPROF_TMPDIR="+os.TempDir())
-	}
+}
 
-	top, err := cmd.CombinedOutput()
-	t.Logf("%s", top)
-	if err != nil {
-		t.Fatal(err)
-	}
+var concurrentMapTest = flag.Bool("run_concurrent_map_tests", false, "also run flaky concurrent map tests")
 
-	if !bytes.Contains(top, []byte("MemProf")) {
-		t.Error("missing MemProf in pprof output")
+func TestConcurrentMapWrites(t *testing.T) {
+	if !*concurrentMapTest {
+		t.Skip("skipping without -run_concurrent_map_tests")
 	}
+	testenv.MustHaveGoRun(t)
+	output := runTestProg(t, "testprog", "concurrentMapWrites")
+	want := "fatal error: concurrent map writes"
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+func TestConcurrentMapReadWrite(t *testing.T) {
+	if !*concurrentMapTest {
+		t.Skip("skipping without -run_concurrent_map_tests")
+	}
+	testenv.MustHaveGoRun(t)
+	output := runTestProg(t, "testprog", "concurrentMapReadWrite")
+	want := "fatal error: concurrent map read and map write"
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+func TestConcurrentMapIterateWrite(t *testing.T) {
+	if !*concurrentMapTest {
+		t.Skip("skipping without -run_concurrent_map_tests")
+	}
+	testenv.MustHaveGoRun(t)
+	output := runTestProg(t, "testprog", "concurrentMapIterateWrite")
+	want := "fatal error: concurrent map iteration and map write"
+	if !strings.HasPrefix(output, want) {
+		t.Fatalf("output does not start with %q:\n%s", want, output)
+	}
+}
+
+type point struct {
+	x, y *int
+}
+
+func (p *point) negate() {
+	*p.x = *p.x * -1
+	*p.y = *p.y * -1
+}
+
+// Test for issue #10152.
+func TestPanicInlined(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("recover failed")
+		}
+		buf := make([]byte, 2048)
+		n := runtime.Stack(buf, false)
+		buf = buf[:n]
+		if !bytes.Contains(buf, []byte("(*point).negate(")) {
+			t.Fatalf("expecting stack trace to contain call to (*point).negate()")
+		}
+	}()
+
+	pt := new(point)
+	pt.negate()
 }

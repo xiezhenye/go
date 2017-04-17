@@ -92,7 +92,8 @@ func init() {
 	}
 }
 
-func parseDate(date string) (time.Time, error) {
+// ParseDate parses an RFC 5322 date string.
+func ParseDate(date string) (time.Time, error) {
 	for _, layout := range dateLayouts {
 		t, err := time.Parse(layout, date)
 		if err == nil {
@@ -106,7 +107,11 @@ func parseDate(date string) (time.Time, error) {
 type Header map[string][]string
 
 // Get gets the first value associated with the given key.
+// It is case insensitive; CanonicalMIMEHeaderKey is used
+// to canonicalize the provided key.
 // If there are no values associated with the key, Get returns "".
+// To access multiple values of a key, or to use non-canonical keys,
+// access the map directly.
 func (h Header) Get(key string) string {
 	return textproto.MIMEHeader(h).Get(key)
 }
@@ -119,7 +124,7 @@ func (h Header) Date() (time.Time, error) {
 	if hdr == "" {
 		return time.Time{}, ErrHeaderNotPresent
 	}
-	return parseDate(hdr)
+	return ParseDate(hdr)
 }
 
 // AddressList parses the named header field as a list of addresses.
@@ -345,6 +350,9 @@ func (p *addrParser) consumeAddrSpec() (spec string, err error) {
 		// quoted-string
 		debug.Printf("consumeAddrSpec: parsing quoted-string")
 		localPart, err = p.consumeQuotedString()
+		if localPart == "" {
+			err = errors.New("mail: empty quoted string in addr-spec")
+		}
 	} else {
 		// dot-atom
 		debug.Printf("consumeAddrSpec: parsing dot-atom")
@@ -379,13 +387,15 @@ func (p *addrParser) consumePhrase() (phrase string, err error) {
 	debug.Printf("consumePhrase: [%s]", p.s)
 	// phrase = 1*word
 	var words []string
+	var isPrevEncoded bool
 	for {
 		// word = atom / quoted-string
 		var word string
 		p.skipSpace()
 		if p.empty() {
-			return "", errors.New("mail: missing phrase")
+			break
 		}
+		isEncoded := false
 		if p.peek() == '"' {
 			// quoted-string
 			word, err = p.consumeQuotedString()
@@ -395,7 +405,7 @@ func (p *addrParser) consumePhrase() (phrase string, err error) {
 			// than what RFC 5322 specifies.
 			word, err = p.consumeAtom(true, true)
 			if err == nil {
-				word, err = p.decodeRFC2047Word(word)
+				word, isEncoded, err = p.decodeRFC2047Word(word)
 			}
 		}
 
@@ -403,7 +413,12 @@ func (p *addrParser) consumePhrase() (phrase string, err error) {
 			break
 		}
 		debug.Printf("consumePhrase: consumed %q", word)
-		words = append(words, word)
+		if isPrevEncoded && isEncoded {
+			words[len(words)-1] += word
+		} else {
+			words = append(words, word)
+		}
+		isPrevEncoded = isEncoded
 	}
 	// Ignore any error if we got at least one word.
 	if err != nil && len(words) == 0 {
@@ -462,9 +477,6 @@ Loop:
 		i += size
 	}
 	p.s = p.s[i+1:]
-	if len(qsb) == 0 {
-		return "", errors.New("mail: empty quoted-string")
-	}
 	return string(qsb), nil
 }
 
@@ -535,22 +547,23 @@ func (p *addrParser) len() int {
 	return len(p.s)
 }
 
-func (p *addrParser) decodeRFC2047Word(s string) (string, error) {
+func (p *addrParser) decodeRFC2047Word(s string) (word string, isEncoded bool, err error) {
 	if p.dec != nil {
-		return p.dec.DecodeHeader(s)
+		word, err = p.dec.Decode(s)
+	} else {
+		word, err = rfc2047Decoder.Decode(s)
 	}
 
-	dec, err := rfc2047Decoder.Decode(s)
 	if err == nil {
-		return dec, nil
+		return word, true, nil
 	}
 
 	if _, ok := err.(charsetError); ok {
-		return s, err
+		return s, true, err
 	}
 
 	// Ignore invalid RFC 2047 encoded-word errors.
-	return s, nil
+	return s, false, nil
 }
 
 var rfc2047Decoder = mime.WordDecoder{

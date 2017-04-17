@@ -8,7 +8,5 @@ package main
 
 func main() {
 	for x		// GCCGO_ERROR "undefined"
-	{		// ERROR "missing .*{.* after for clause|missing operand"
-		z	// GCCGO_ERROR "undefined"
-
-
+	{		// ERROR "unexpected {, expecting for loop condition"
+		z

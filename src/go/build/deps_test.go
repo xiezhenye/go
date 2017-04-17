@@ -57,9 +57,9 @@ var pkgDeps = map[string][]string{
 	// L1 adds simple functions and strings processing,
 	// but not Unicode tables.
 	"math":          {"unsafe"},
+	"math/bits":     {},
 	"math/cmplx":    {"math"},
 	"math/rand":     {"L0", "math"},
-	"sort":          {},
 	"strconv":       {"L0", "unicode/utf8", "math"},
 	"unicode/utf16": {},
 	"unicode/utf8":  {},
@@ -67,6 +67,7 @@ var pkgDeps = map[string][]string{
 	"L1": {
 		"L0",
 		"math",
+		"math/bits",
 		"math/cmplx",
 		"math/rand",
 		"sort",
@@ -94,8 +95,8 @@ var pkgDeps = map[string][]string{
 	// L3 adds reflection and some basic utility packages
 	// and interface definitions, but nothing that makes
 	// system calls.
-	"crypto":              {"L2", "hash"},          // interfaces
-	"crypto/cipher":       {"L2", "crypto/subtle"}, // interfaces
+	"crypto":              {"L2", "hash"}, // interfaces
+	"crypto/cipher":       {"L2", "crypto/subtle"},
 	"crypto/subtle":       {},
 	"encoding/base32":     {"L2"},
 	"encoding/base64":     {"L2"},
@@ -109,11 +110,13 @@ var pkgDeps = map[string][]string{
 	"image/color":         {"L2"},                // interfaces
 	"image/color/palette": {"L2", "image/color"},
 	"reflect":             {"L2"},
+	"sort":                {"reflect"},
 
 	"L3": {
 		"L2",
 		"crypto",
 		"crypto/cipher",
+		"crypto/internal/cipherhw",
 		"crypto/subtle",
 		"encoding/base32",
 		"encoding/base64",
@@ -149,7 +152,8 @@ var pkgDeps = map[string][]string{
 		"syscall",
 	},
 
-	"os":            {"L1", "os", "syscall", "time", "internal/syscall/windows"},
+	"internal/poll": {"L0", "internal/race", "syscall", "time", "unicode/utf16", "unicode/utf8"},
+	"os":            {"L1", "os", "syscall", "time", "internal/poll", "internal/syscall/windows"},
 	"path/filepath": {"L2", "os", "syscall"},
 	"io/ioutil":     {"L2", "os", "path/filepath", "time"},
 	"os/exec":       {"L2", "os", "context", "path/filepath", "syscall"},
@@ -173,14 +177,14 @@ var pkgDeps = map[string][]string{
 	"regexp":         {"L2", "regexp/syntax"},
 	"regexp/syntax":  {"L2"},
 	"runtime/debug":  {"L2", "fmt", "io/ioutil", "os", "time"},
-	"runtime/pprof":  {"L2", "fmt", "os", "text/tabwriter"},
+	"runtime/pprof":  {"L2", "compress/gzip", "context", "encoding/binary", "fmt", "io/ioutil", "os", "text/tabwriter", "time"},
 	"runtime/trace":  {"L0"},
 	"text/tabwriter": {"L2"},
 
-	"testing":          {"L2", "flag", "fmt", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
+	"testing":          {"L2", "flag", "fmt", "internal/race", "os", "runtime/debug", "runtime/pprof", "runtime/trace", "time"},
 	"testing/iotest":   {"L2", "log"},
-	"testing/quick":    {"L2", "flag", "fmt", "reflect"},
-	"internal/testenv": {"L2", "OS", "flag", "testing"},
+	"testing/quick":    {"L2", "flag", "fmt", "reflect", "time"},
+	"internal/testenv": {"L2", "OS", "flag", "testing", "syscall"},
 
 	// L4 is defined as L3+fmt+log+time, because in general once
 	// you're using L3 packages, use of fmt, log, or time is not a big deal.
@@ -213,9 +217,10 @@ var pkgDeps = map[string][]string{
 
 	// Go type checking.
 	"go/constant":               {"L4", "go/token", "math/big"},
-	"go/importer":               {"L4", "go/internal/gcimporter", "go/internal/gccgoimporter", "go/types"},
+	"go/importer":               {"L4", "go/build", "go/internal/gccgoimporter", "go/internal/gcimporter", "go/internal/srcimporter", "go/token", "go/types"},
 	"go/internal/gcimporter":    {"L4", "OS", "go/build", "go/constant", "go/token", "go/types", "text/scanner"},
 	"go/internal/gccgoimporter": {"L4", "OS", "debug/elf", "go/constant", "go/token", "go/types", "text/scanner"},
+	"go/internal/srcimporter":   {"L4", "fmt", "go/ast", "go/build", "go/parser", "go/token", "go/types", "path/filepath"},
 	"go/types":                  {"L4", "GOPARSER", "container/heap", "go/constant"},
 
 	// One of a kind.
@@ -228,8 +233,8 @@ var pkgDeps = map[string][]string{
 	"compress/lzw":             {"L4"},
 	"compress/zlib":            {"L4", "compress/flate"},
 	"context":                  {"errors", "fmt", "reflect", "sync", "time"},
-	"database/sql":             {"L4", "container/list", "database/sql/driver"},
-	"database/sql/driver":      {"L4", "time"},
+	"database/sql":             {"L4", "container/list", "context", "database/sql/driver", "database/sql/internal"},
+	"database/sql/driver":      {"L4", "context", "time", "database/sql/internal"},
 	"debug/dwarf":              {"L4"},
 	"debug/elf":                {"L4", "OS", "debug/dwarf", "compress/zlib"},
 	"debug/gosym":              {"L4"},
@@ -261,8 +266,11 @@ var pkgDeps = map[string][]string{
 	"mime/quotedprintable":     {"L4"},
 	"net/internal/socktest":    {"L4", "OS", "syscall"},
 	"net/url":                  {"L4"},
-	"text/scanner":             {"L4", "OS"},
-	"text/template/parse":      {"L4"},
+	"plugin":                   {"L0", "OS", "CGO"},
+	"runtime/pprof/internal/profile": {"L4", "OS", "compress/gzip", "regexp"},
+	"testing/internal/testdeps":      {"L4", "runtime/pprof", "regexp"},
+	"text/scanner":                   {"L4", "OS"},
+	"text/template/parse":            {"L4"},
 
 	"html/template": {
 		"L4", "OS", "encoding/json", "html", "text/template",
@@ -295,9 +303,9 @@ var pkgDeps = map[string][]string{
 	"net": {
 		"L0", "CGO",
 		"context", "math/rand", "os", "sort", "syscall", "time",
-		"internal/nettrace",
+		"internal/nettrace", "internal/poll",
 		"internal/syscall/windows", "internal/singleflight", "internal/race",
-		"golang_org/x/net/route",
+		"golang_org/x/net/lif", "golang_org/x/net/route",
 	},
 
 	// NET enables use of basic network-related packages.
@@ -332,6 +340,9 @@ var pkgDeps = map[string][]string{
 		"crypto/sha1",
 		"crypto/sha256",
 		"crypto/sha512",
+		"golang_org/x/crypto/chacha20poly1305",
+		"golang_org/x/crypto/curve25519",
+		"golang_org/x/crypto/poly1305",
 	},
 
 	// Random byte, number generation.
@@ -375,24 +386,33 @@ var pkgDeps = map[string][]string{
 	// HTTP, kingpin of dependencies.
 	"net/http": {
 		"L4", "NET", "OS",
-		"context", "compress/gzip", "container/list", "crypto/tls",
-		"mime/multipart", "runtime/debug",
-		"net/http/internal",
+		"compress/gzip",
+		"container/list",
+		"context",
+		"crypto/rand",
+		"crypto/tls",
 		"golang_org/x/net/http2/hpack",
+		"golang_org/x/net/idna",
 		"golang_org/x/net/lex/httplex",
+		"golang_org/x/net/proxy",
+		"golang_org/x/text/unicode/norm",
+		"golang_org/x/text/width",
 		"internal/nettrace",
+		"mime/multipart",
 		"net/http/httptrace",
+		"net/http/internal",
+		"runtime/debug",
 	},
 	"net/http/internal":  {"L4"},
-	"net/http/httptrace": {"context", "internal/nettrace", "net", "reflect", "time"},
+	"net/http/httptrace": {"context", "crypto/tls", "internal/nettrace", "net", "reflect", "time"},
 
 	// HTTP-using packages.
 	"expvar":             {"L4", "OS", "encoding/json", "net/http"},
 	"net/http/cgi":       {"L4", "NET", "OS", "crypto/tls", "net/http", "regexp"},
 	"net/http/cookiejar": {"L4", "NET", "net/http"},
-	"net/http/fcgi":      {"L4", "NET", "OS", "net/http", "net/http/cgi"},
-	"net/http/httptest":  {"L4", "NET", "OS", "crypto/tls", "flag", "net/http", "net/http/internal"},
-	"net/http/httputil":  {"L4", "NET", "OS", "net/http", "net/http/internal"},
+	"net/http/fcgi":      {"L4", "NET", "OS", "context", "net/http", "net/http/cgi"},
+	"net/http/httptest":  {"L4", "NET", "OS", "crypto/tls", "flag", "net/http", "net/http/internal", "crypto/x509"},
+	"net/http/httputil":  {"L4", "NET", "OS", "context", "net/http", "net/http/internal"},
 	"net/http/pprof":     {"L4", "OS", "html/template", "net/http", "runtime/pprof", "runtime/trace"},
 	"net/rpc":            {"L4", "NET", "encoding/gob", "html/template", "net/http"},
 	"net/rpc/jsonrpc":    {"L4", "NET", "encoding/json", "net/rpc"},

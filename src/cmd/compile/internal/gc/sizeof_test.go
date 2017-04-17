@@ -22,25 +22,10 @@ func TestSizeof(t *testing.T) {
 		_32bit uintptr     // size on 32bit platforms
 		_64bit uintptr     // size on 64bit platforms
 	}{
-		{Flow{}, 52, 88},
-		{Func{}, 96, 168},
-		{Name{}, 52, 80},
-		{Node{}, 92, 144},
-		{Sym{}, 60, 112},
-		{Type{}, 52, 80},
-		{MapType{}, 20, 40},
-		{ForwardType{}, 16, 32},
-		{FuncType{}, 28, 48},
-		{StructType{}, 12, 24},
-		{InterType{}, 4, 8},
-		{ChanType{}, 8, 16},
-		{ArrayType{}, 16, 24},
-		{InterMethType{}, 4, 8},
-		{DDDFieldType{}, 4, 8},
-		{FuncArgsType{}, 4, 8},
-		{ChanArgsType{}, 4, 8},
-		{PtrType{}, 4, 8},
-		{SliceType{}, 4, 8},
+		{Func{}, 100, 168},
+		{Name{}, 36, 56},
+		{Param{}, 28, 56},
+		{Node{}, 84, 136},
 	}
 
 	for _, tt := range tests {

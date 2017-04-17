@@ -209,7 +209,11 @@ TEXT runtime·gosave(SB), NOSPLIT, $0-4
 	MOVL	0(SP), BX		// caller's PC
 	MOVL	BX, gobuf_pc(AX)
 	MOVL	$0, gobuf_ret(AX)
-	MOVL	$0, gobuf_ctxt(AX)
+	// Assert ctxt is zero. See func save.
+	MOVL	gobuf_ctxt(AX), BX
+	TESTL	BX, BX
+	JZ	2(PC)
+	CALL	runtime·badctxt(SB)
 	get_tls(CX)
 	MOVL	g(CX), BX
 	MOVL	BX, gobuf_g(AX)
@@ -217,8 +221,20 @@ TEXT runtime·gosave(SB), NOSPLIT, $0-4
 
 // void gogo(Gobuf*)
 // restore state from Gobuf; longjmp
-TEXT runtime·gogo(SB), NOSPLIT, $0-4
+TEXT runtime·gogo(SB), NOSPLIT, $8-4
 	MOVL	buf+0(FP), BX		// gobuf
+
+	// If ctxt is not nil, invoke deletion barrier before overwriting.
+	MOVL	gobuf_ctxt(BX), DX
+	TESTL	DX, DX
+	JZ	nilctxt
+	LEAL	gobuf_ctxt(BX), AX
+	MOVL	AX, 0(SP)
+	MOVL	$0, 4(SP)
+	CALL	runtime·writebarrierptr_prewrite(SB)
+	MOVL	buf+0(FP), BX
+
+nilctxt:
 	MOVL	gobuf_g(BX), DX
 	MOVL	0(DX), CX		// make sure g != nil
 	get_tls(CX)
@@ -354,13 +370,15 @@ TEXT runtime·morestack(SB),NOSPLIT,$0-0
 	MOVL	g_m(BX), BX
 	MOVL	m_g0(BX), SI
 	CMPL	g(CX), SI
-	JNE	2(PC)
+	JNE	3(PC)
+	CALL	runtime·badmorestackg0(SB)
 	INT	$3
 
 	// Cannot grow signal stack.
 	MOVL	m_gsignal(BX), SI
 	CMPL	g(CX), SI
-	JNE	2(PC)
+	JNE	3(PC)
+	CALL	runtime·badmorestackgsignal(SB)
 	INT	$3
 
 	// Called from f.
@@ -379,7 +397,7 @@ TEXT runtime·morestack(SB),NOSPLIT,$0-0
 	MOVL	SI, (g_sched+gobuf_g)(SI)
 	LEAL	4(SP), AX	// f's SP
 	MOVL	AX, (g_sched+gobuf_sp)(SI)
-	MOVL	DX, (g_sched+gobuf_ctxt)(SI)
+	// newstack will fill gobuf.ctxt.
 
 	// Call newstack on m->g0's stack.
 	MOVL	m_g0(BX), BP
@@ -387,29 +405,15 @@ TEXT runtime·morestack(SB),NOSPLIT,$0-0
 	MOVL	(g_sched+gobuf_sp)(BP), AX
 	MOVL	-4(AX), BX	// fault if CALL would, before smashing SP
 	MOVL	AX, SP
+	PUSHL	DX	// ctxt argument
 	CALL	runtime·newstack(SB)
 	MOVL	$0, 0x1003	// crash if newstack returns
+	POPL	DX	// keep balance check happy
 	RET
 
 TEXT runtime·morestack_noctxt(SB),NOSPLIT,$0-0
 	MOVL	$0, DX
 	JMP runtime·morestack(SB)
-
-TEXT runtime·stackBarrier(SB),NOSPLIT,$0
-	// We came here via a RET to an overwritten return PC.
-	// AX may be live. Other registers are available.
-
-	// Get the original return PC, g.stkbar[g.stkbarPos].savedLRVal.
-	get_tls(CX)
-	MOVL	g(CX), CX
-	MOVL	(g_stkbar+slice_array)(CX), DX
-	MOVL	g_stkbarPos(CX), BX
-	IMULL	$stkbar__size, BX	// Too big for SIB.
-	MOVL	stkbar_savedLRVal(DX)(BX*1), BX
-	// Record that this stack barrier was hit.
-	ADDL	$1, g_stkbarPos(CX)
-	// Jump to the original return PC.
-	JMP	BX
 
 // reflectcall: call a function with the given argument list
 // func call(argtype *_type, f *FuncVal, arg *byte, argsize, retoffset uint32).
@@ -473,6 +477,7 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-20;		\
 	PCDATA  $PCDATA_StackMapIndex, $0;	\
 	CALL	AX;				\
 	/* copy return values back */		\
+	MOVL	argtype+0(FP), DX;		\
 	MOVL	argptr+8(FP), DI;		\
 	MOVL	argsize+12(FP), CX;		\
 	MOVL	retoffset+16(FP), BX;		\
@@ -480,17 +485,19 @@ TEXT NAME(SB), WRAPPER, $MAXSIZE-20;		\
 	ADDL	BX, DI;				\
 	ADDL	BX, SI;				\
 	SUBL	BX, CX;				\
-	REP;MOVSB;				\
-	/* execute write barrier updates */	\
-	MOVL	argtype+0(FP), DX;		\
-	MOVL	argptr+8(FP), DI;		\
-	MOVL	argsize+12(FP), CX;		\
-	MOVL	retoffset+16(FP), BX;		\
-	MOVL	DX, 0(SP);			\
-	MOVL	DI, 4(SP);			\
-	MOVL	CX, 8(SP);			\
-	MOVL	BX, 12(SP);			\
-	CALL	runtime·callwritebarrier(SB);	\
+	CALL	callRet<>(SB);			\
+	RET
+
+// callRet copies return values back at the end of call*. This is a
+// separate function so it can allocate stack space for the arguments
+// to reflectcallmove. It does not follow the Go ABI; it expects its
+// arguments in registers.
+TEXT callRet<>(SB), NOSPLIT, $16-0
+	MOVL	DX, 0(SP)
+	MOVL	DI, 4(SP)
+	MOVL	SI, 8(SP)
+	MOVL	CX, 12(SP)
+	CALL	runtime·reflectcallmove(SB)
 	RET
 
 CALLFN(·call16, 16)
@@ -565,7 +572,11 @@ TEXT gosave<>(SB),NOSPLIT,$0
 	MOVL	-4(AX), AX
 	MOVL	AX, (g_sched+gobuf_pc)(BX)
 	MOVL	$0, (g_sched+gobuf_ret)(BX)
-	MOVL	$0, (g_sched+gobuf_ctxt)(BX)
+	// Assert ctxt is zero. See func save.
+	MOVL	(g_sched+gobuf_ctxt)(BX), AX
+	TESTL	AX, AX
+	JZ	2(PC)
+	CALL	runtime·badctxt(SB)
 	POPL	BX
 	POPL	AX
 	RET
@@ -785,31 +796,6 @@ TEXT runtime·stackcheck(SB), NOSPLIT, $0-0
 TEXT runtime·getcallerpc(SB),NOSPLIT,$4-8
 	MOVL	argp+0(FP),AX		// addr of first arg
 	MOVL	-4(AX),AX		// get calling pc
-	CMPL	AX, runtime·stackBarrierPC(SB)
-	JNE	nobar
-	// Get original return PC.
-	CALL	runtime·nextBarrierPC(SB)
-	MOVL	0(SP), AX
-nobar:
-	MOVL	AX, ret+4(FP)
-	RET
-
-TEXT runtime·setcallerpc(SB),NOSPLIT,$4-8
-	MOVL	argp+0(FP),AX		// addr of first arg
-	MOVL	pc+4(FP), BX
-	MOVL	-4(AX), DX
-	CMPL	DX, runtime·stackBarrierPC(SB)
-	JEQ	setbar
-	MOVL	BX, -4(AX)		// set calling pc
-	RET
-setbar:
-	// Set the stack barrier return PC.
-	MOVL	BX, 0(SP)
-	CALL	runtime·setNextBarrierPC(SB)
-	RET
-
-TEXT runtime·getcallersp(SB), NOSPLIT, $0-8
-	MOVL	argp+0(FP), AX
 	MOVL	AX, ret+4(FP)
 	RET
 
@@ -842,9 +828,6 @@ TEXT runtime·ldt0setup(SB),NOSPLIT,$16-0
 
 TEXT runtime·emptyfunc(SB),0,$0-0
 	RET
-
-TEXT runtime·abort(SB),NOSPLIT,$0-0
-	INT $0x3
 
 // memhash_varlen(p unsafe.Pointer, h seed) uintptr
 // redirects to memhash(p, h, size) using the size
@@ -1290,15 +1273,15 @@ eq:
 // See runtime_test.go:eqstring_generic for
 // equivalent Go code.
 TEXT runtime·eqstring(SB),NOSPLIT,$0-17
-	MOVL	s1str+0(FP), SI
-	MOVL	s2str+8(FP), DI
+	MOVL	s1_base+0(FP), SI
+	MOVL	s2_base+8(FP), DI
 	CMPL	SI, DI
 	JEQ	same
-	MOVL	s1len+4(FP), BX
-	LEAL	v+16(FP), AX
+	MOVL	s1_len+4(FP), BX
+	LEAL	ret+16(FP), AX
 	JMP	runtime·memeqbody(SB)
 same:
-	MOVB	$1, v+16(FP)
+	MOVB	$1, ret+16(FP)
 	RET
 
 TEXT bytes·Equal(SB),NOSPLIT,$0-25
@@ -1574,20 +1557,6 @@ allsame:
 	SETEQ	CX	// 1 if alen == blen
 	LEAL	-1(CX)(BX*2), BX	// 1,0,-1 result
 	MOVL	BX, (AX)
-	RET
-
-TEXT runtime·fastrand1(SB), NOSPLIT, $0-4
-	get_tls(CX)
-	MOVL	g(CX), AX
-	MOVL	g_m(AX), AX
-	MOVL	m_fastrand(AX), DX
-	ADDL	DX, DX
-	MOVL	DX, BX
-	XORL	$0x88888eef, DX
-	JPL	2(PC)
-	MOVL	BX, DX
-	MOVL	DX, m_fastrand(AX)
-	MOVL	DX, ret+0(FP)
 	RET
 
 TEXT runtime·return0(SB), NOSPLIT, $0

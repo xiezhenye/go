@@ -8,6 +8,7 @@ import (
 	"io"
 	. "runtime"
 	"runtime/debug"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -43,6 +44,23 @@ func BenchmarkIfaceCmpNil100(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		for j := 0; j < 100; j++ {
 			if errfn1() == nil {
+				b.Fatal("bad comparison")
+			}
+		}
+	}
+}
+
+var efaceCmp1 interface{}
+var efaceCmp2 interface{}
+
+func BenchmarkEfaceCmpDiff(b *testing.B) {
+	x := 5
+	efaceCmp1 = &x
+	y := 6
+	efaceCmp2 = &y
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < 100; j++ {
+			if efaceCmp1 == efaceCmp2 {
 				b.Fatal("bad comparison")
 			}
 		}
@@ -327,5 +345,13 @@ func TestGoroutineProfileTrivial(t *testing.T) {
 		if i >= 10 {
 			t.Fatalf("GoroutineProfile not converging")
 		}
+	}
+}
+
+func TestVersion(t *testing.T) {
+	// Test that version does not contain \r or \n.
+	vers := Version()
+	if strings.Contains(vers, "\r") || strings.Contains(vers, "\n") {
+		t.Fatalf("cr/nl in version: %q", vers)
 	}
 }

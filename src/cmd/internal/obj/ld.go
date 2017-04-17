@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -76,17 +76,10 @@ func mkfwd(sym *LSym) {
 	}
 }
 
-func Copyp(ctxt *Link, q *Prog) *Prog {
-	p := ctxt.NewProg()
-	*p = *q
-	return p
-}
-
-func Appendp(ctxt *Link, q *Prog) *Prog {
-	p := ctxt.NewProg()
+func Appendp(q *Prog, newprog ProgAlloc) *Prog {
+	p := newprog()
 	p.Link = q.Link
 	q.Link = p
-	p.Lineno = q.Lineno
-	p.Mode = q.Mode
+	p.Pos = q.Pos
 	return p
 }

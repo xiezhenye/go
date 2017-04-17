@@ -17,7 +17,7 @@ check() {
 expect() {
 	file=$1
 	shift
-	if go build $file >errs 2>&1; then
+	if go build -gcflags=-C $file >errs 2>&1; then
 		echo 1>&2 misc/cgo/errors/test.bash: BUG: expected cgo to fail on $file but it succeeded
 		exit 1
 	fi
@@ -46,6 +46,7 @@ check issue13423.go
 expect issue13635.go C.uchar C.schar C.ushort C.uint C.ulong C.longlong C.ulonglong C.complexfloat C.complexdouble
 check issue13830.go
 check issue16116.go
+check issue16591.go
 
 if ! go build issue14669.go; then
 	exit 1
@@ -57,6 +58,16 @@ fi
 if ! go run ptr.go; then
 	exit 1
 fi
+
+# The malloc.go test should crash.
+rm -f malloc.out
+if go run malloc.go >malloc.out 2>&1; then
+	echo '`go run malloc.go` succeeded unexpectedly'
+	cat malloc.out
+	rm -f malloc.out
+	exit 1
+fi
+rm -f malloc.out
 
 rm -rf errs _obj
 exit 0

@@ -159,16 +159,8 @@ const (
 
 const (
 	// mark flags
-	LABEL   = 1 << 0
-	LEAF    = 1 << 1
-	FLOAT   = 1 << 2
-	BRANCH  = 1 << 3
-	LOAD    = 1 << 4
-	FCMP    = 1 << 5
-	SYNC    = 1 << 6
-	LIST    = 1 << 7
-	FOLL    = 1 << 8
-	NOSCHED = 1 << 9
+	LEAF = 1 << iota
+	BRANCH
 )
 
 const ( // comments from func aclass in asmz.go
@@ -209,24 +201,27 @@ const (
 	// integer arithmetic
 	AADD = obj.ABaseS390X + obj.A_ARCHSPECIFIC + iota
 	AADDC
-	AADDME
 	AADDE
-	AADDZE
+	AADDW
 	ADIVW
 	ADIVWU
 	ADIVD
 	ADIVDU
+	AMODW
+	AMODWU
+	AMODD
+	AMODDU
 	AMULLW
 	AMULLD
 	AMULHD
 	AMULHDU
 	ASUB
 	ASUBC
-	ASUBME
 	ASUBV
 	ASUBE
-	ASUBZE
+	ASUBW
 	ANEG
+	ANEGW
 
 	// integer moves
 	AMOVWBR
@@ -240,14 +235,24 @@ const (
 	AMOVD
 	AMOVDBR
 
+	// conditional moves
+	AMOVDEQ
+	AMOVDGE
+	AMOVDGT
+	AMOVDLE
+	AMOVDLT
+	AMOVDNE
+
+	// find leftmost one
+	AFLOGR
+
 	// integer bitwise
 	AAND
-	AANDN
-	ANAND
-	ANOR
+	AANDW
 	AOR
-	AORN
+	AORW
 	AXOR
+	AXORW
 	ASLW
 	ASLD
 	ASRW
@@ -276,16 +281,15 @@ const (
 	AFMULS
 	AFNABS
 	AFNEG
-	AFNMADD
-	AFNMADDS
-	AFNMSUB
-	AFNMSUBS
+	AFNEGS
 	ALEDBR
 	ALDEBR
 	AFSUB
 	AFSUBS
 	AFSQRT
 	AFSQRTS
+	AFIEBR
+	AFIDBR
 
 	// convert from int32/int64 to float/float64
 	ACEFBRA
@@ -332,6 +336,8 @@ const (
 	ABGT
 	ABLE
 	ABLT
+	ABLEU
+	ABLTU
 	ABNE
 	ABVC
 	ABVS
@@ -363,6 +369,18 @@ const (
 	ALARL
 	ALA
 	ALAY
+
+	// interlocked load and op
+	ALAA
+	ALAAG
+	ALAAL
+	ALAALG
+	ALAN
+	ALANG
+	ALAX
+	ALAXG
+	ALAO
+	ALAOG
 
 	// load/store multiple
 	ALMY

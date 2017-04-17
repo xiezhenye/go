@@ -85,7 +85,8 @@ func TestTraceSymbolize(t *testing.T) {
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
-			t.Fatalf("failed to accept: %v", err)
+			t.Errorf("failed to accept: %v", err)
+			return
 		}
 		c.Close()
 	}()
@@ -102,10 +103,10 @@ func TestTraceSymbolize(t *testing.T) {
 		pipeReadDone <- true
 	}()
 
-	time.Sleep(time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	runtime.GC()
 	runtime.Gosched()
-	time.Sleep(time.Millisecond) // the last chance for the goroutines above to block
+	time.Sleep(100 * time.Millisecond) // the last chance for the goroutines above to block
 	done1 <- true
 	<-done2
 	select {
@@ -139,18 +140,18 @@ func TestTraceSymbolize(t *testing.T) {
 	want := []eventDesc{
 		{trace.EvGCStart, []frame{
 			{"runtime.GC", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 106},
+			{"runtime/trace_test.TestTraceSymbolize", 107},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoStart, []frame{
 			{"runtime/trace_test.TestTraceSymbolize.func1", 37},
 		}},
 		{trace.EvGoSched, []frame{
-			{"runtime/trace_test.TestTraceSymbolize", 107},
+			{"runtime/trace_test.TestTraceSymbolize", 108},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoCreate, []frame{
-			{"runtime/trace_test.TestTraceSymbolize", 39},
+			{"runtime/trace_test.TestTraceSymbolize", 37},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoStop, []frame{
@@ -171,7 +172,7 @@ func TestTraceSymbolize(t *testing.T) {
 		}},
 		{trace.EvGoUnblock, []frame{
 			{"runtime.chansend1", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 109},
+			{"runtime/trace_test.TestTraceSymbolize", 110},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoBlockSend, []frame{
@@ -180,7 +181,7 @@ func TestTraceSymbolize(t *testing.T) {
 		}},
 		{trace.EvGoUnblock, []frame{
 			{"runtime.chanrecv1", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 110},
+			{"runtime/trace_test.TestTraceSymbolize", 111},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoBlockSelect, []frame{
@@ -189,7 +190,7 @@ func TestTraceSymbolize(t *testing.T) {
 		}},
 		{trace.EvGoUnblock, []frame{
 			{"runtime.selectgo", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 111},
+			{"runtime/trace_test.TestTraceSymbolize", 112},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoBlockSync, []frame{
@@ -198,7 +199,7 @@ func TestTraceSymbolize(t *testing.T) {
 		}},
 		{trace.EvGoUnblock, []frame{
 			{"sync.(*Mutex).Unlock", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 115},
+			{"runtime/trace_test.TestTraceSymbolize", 116},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoBlockSync, []frame{
@@ -208,7 +209,7 @@ func TestTraceSymbolize(t *testing.T) {
 		{trace.EvGoUnblock, []frame{
 			{"sync.(*WaitGroup).Add", 0},
 			{"sync.(*WaitGroup).Done", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 116},
+			{"runtime/trace_test.TestTraceSymbolize", 117},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoBlockCond, []frame{
@@ -217,12 +218,12 @@ func TestTraceSymbolize(t *testing.T) {
 		}},
 		{trace.EvGoUnblock, []frame{
 			{"sync.(*Cond).Signal", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 117},
+			{"runtime/trace_test.TestTraceSymbolize", 118},
 			{"testing.tRunner", 0},
 		}},
 		{trace.EvGoSleep, []frame{
 			{"time.Sleep", 0},
-			{"runtime/trace_test.TestTraceSymbolize", 108},
+			{"runtime/trace_test.TestTraceSymbolize", 109},
 			{"testing.tRunner", 0},
 		}},
 	}
@@ -230,6 +231,7 @@ func TestTraceSymbolize(t *testing.T) {
 	if runtime.GOOS != "windows" && runtime.GOOS != "plan9" {
 		want = append(want, []eventDesc{
 			{trace.EvGoBlockNet, []frame{
+				{"internal/poll.(*FD).Accept", 0},
 				{"net.(*netFD).accept", 0},
 				{"net.(*TCPListener).accept", 0},
 				{"net.(*TCPListener).Accept", 0},
@@ -238,9 +240,10 @@ func TestTraceSymbolize(t *testing.T) {
 			{trace.EvGoSysCall, []frame{
 				{"syscall.read", 0},
 				{"syscall.Read", 0},
+				{"internal/poll.(*FD).Read", 0},
 				{"os.(*File).read", 0},
 				{"os.(*File).Read", 0},
-				{"runtime/trace_test.TestTraceSymbolize.func11", 101},
+				{"runtime/trace_test.TestTraceSymbolize.func11", 102},
 			}},
 		}...)
 	}
@@ -273,9 +276,10 @@ func TestTraceSymbolize(t *testing.T) {
 				continue
 			}
 			for _, f := range ev.Stk {
-				t.Logf("  %v:%v", f.Fn, f.Line)
+				t.Logf("  %v :: %s:%v", f.Fn, f.File, f.Line)
 			}
 			t.Logf("---")
 		}
+		t.Logf("======")
 	}
 }

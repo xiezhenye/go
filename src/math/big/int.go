@@ -324,22 +324,22 @@ func (x *Int) Cmp(y *Int) (r int) {
 	return
 }
 
-// low32 returns the least significant 32 bits of z.
-func low32(z nat) uint32 {
-	if len(z) == 0 {
+// low32 returns the least significant 32 bits of x.
+func low32(x nat) uint32 {
+	if len(x) == 0 {
 		return 0
 	}
-	return uint32(z[0])
+	return uint32(x[0])
 }
 
-// low64 returns the least significant 64 bits of z.
-func low64(z nat) uint64 {
-	if len(z) == 0 {
+// low64 returns the least significant 64 bits of x.
+func low64(x nat) uint64 {
+	if len(x) == 0 {
 		return 0
 	}
-	v := uint64(z[0])
-	if _W == 32 && len(z) > 1 {
-		v |= uint64(z[1]) << 32
+	v := uint64(x[0])
+	if _W == 32 && len(x) > 1 {
+		return uint64(x[1])<<32 | v
 	}
 	return v
 }
@@ -360,8 +360,23 @@ func (x *Int) Uint64() uint64 {
 	return low64(x.abs)
 }
 
+// IsInt64 reports whether x can be represented as an int64.
+func (x *Int) IsInt64() bool {
+	if len(x.abs) <= 64/_W {
+		w := int64(low64(x.abs))
+		return w >= 0 || x.neg && w == -w
+	}
+	return false
+}
+
+// IsUint64 reports whether x can be represented as a uint64.
+func (x *Int) IsUint64() bool {
+	return !x.neg && len(x.abs) <= 64/_W
+}
+
 // SetString sets z to the value of s, interpreted in the given base,
-// and returns z and a boolean indicating success. If SetString fails,
+// and returns z and a boolean indicating success. The entire string
+// (not just a prefix) must be valid for success. If SetString fails,
 // the value of z is undefined but the returned value is nil.
 //
 // The base argument must be 0 or a value between 2 and MaxBase. If the base
@@ -371,12 +386,11 @@ func (x *Int) Uint64() uint64 {
 //
 func (z *Int) SetString(s string, base int) (*Int, bool) {
 	r := strings.NewReader(s)
-	_, _, err := z.scan(r, base)
-	if err != nil {
+	if _, _, err := z.scan(r, base); err != nil {
 		return nil, false
 	}
-	_, err = r.ReadByte()
-	if err != io.EOF {
+	// entire string must have been consumed
+	if _, err := r.ReadByte(); err != io.EOF {
 		return nil, false
 	}
 	return z, true // err == io.EOF => scan consumed all of s
@@ -404,8 +418,11 @@ func (x *Int) BitLen() int {
 
 // Exp sets z = x**y mod |m| (i.e. the sign of m is ignored), and returns z.
 // If y <= 0, the result is 1 mod |m|; if m == nil or m == 0, z = x**y.
-// See Knuth, volume 2, section 4.6.3.
+//
+// Modular exponentation of inputs of a particular size is not a
+// cryptographically constant-time operation.
 func (z *Int) Exp(x, y, m *Int) *Int {
+	// See Knuth, volume 2, section 4.6.3.
 	var yWords nat
 	if !y.neg {
 		yWords = y.abs
@@ -550,23 +567,10 @@ func (z *Int) binaryGCD(a, b *Int) *Int {
 	return z.Lsh(u, k)
 }
 
-// ProbablyPrime performs n Miller-Rabin tests to check whether x is prime.
-// If x is prime, it returns true.
-// If x is not prime, it returns false with probability at least 1 - ¼ⁿ.
-//
-// It is not suitable for judging primes that an adversary may have crafted
-// to fool this test.
-func (x *Int) ProbablyPrime(n int) bool {
-	if n <= 0 {
-		panic("non-positive n for ProbablyPrime")
-	}
-	return !x.neg && x.abs.probablyPrime(n)
-}
-
 // Rand sets z to a pseudo-random number in [0, n) and returns z.
 func (z *Int) Rand(rnd *rand.Rand, n *Int) *Int {
 	z.neg = false
-	if n.neg == true || len(n.abs) == 0 {
+	if n.neg || len(n.abs) == 0 {
 		z.abs = nil
 		return z
 	}
@@ -577,6 +581,11 @@ func (z *Int) Rand(rnd *rand.Rand, n *Int) *Int {
 // ModInverse sets z to the multiplicative inverse of g in the ring ℤ/nℤ
 // and returns z. If g and n are not relatively prime, the result is undefined.
 func (z *Int) ModInverse(g, n *Int) *Int {
+	if g.neg {
+		// GCD expects parameters a and b to be > 0.
+		var g2 Int
+		g = g2.Mod(g, n)
+	}
 	var d Int
 	d.GCD(z, nil, g, n)
 	// x and y are such that g*x + n*y = d. Since g and n are
@@ -930,5 +939,16 @@ func (z *Int) Not(x *Int) *Int {
 	// ^x == -x-1 == -(x+1)
 	z.abs = z.abs.add(x.abs, natOne)
 	z.neg = true // z cannot be zero if x is positive
+	return z
+}
+
+// Sqrt sets z to ⌊√x⌋, the largest integer such that z² ≤ x, and returns z.
+// It panics if x is negative.
+func (z *Int) Sqrt(x *Int) *Int {
+	if x.neg {
+		panic("square root of negative number")
+	}
+	z.neg = false
+	z.abs = z.abs.sqrt(x.abs)
 	return z
 }

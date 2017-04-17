@@ -4,7 +4,10 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"runtime/internal/sys"
+	"unsafe"
+)
 
 // Should be a built-in for unsafe.Pointer?
 //go:nosplit
@@ -57,14 +60,24 @@ func badsystemstack() {
 	throw("systemstack called from unexpected goroutine")
 }
 
-// memclr clears n bytes starting at ptr.
+// memclrNoHeapPointers clears n bytes starting at ptr.
+//
+// Usually you should use typedmemclr. memclrNoHeapPointers should be
+// used only when the caller knows that *ptr contains no heap pointers
+// because either:
+//
+// 1. *ptr is initialized memory and its type is pointer-free.
+//
+// 2. *ptr is uninitialized memory (e.g., memory that's being reused
+//    for a new allocation) and hence contains only "junk".
+//
 // in memclr_*.s
 //go:noescape
-func memclr(ptr unsafe.Pointer, n uintptr)
+func memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr)
 
-//go:linkname reflect_memclr reflect.memclr
-func reflect_memclr(ptr unsafe.Pointer, n uintptr) {
-	memclr(ptr, n)
+//go:linkname reflect_memclrNoHeapPointers reflect.memclrNoHeapPointers
+func reflect_memclrNoHeapPointers(ptr unsafe.Pointer, n uintptr) {
+	memclrNoHeapPointers(ptr, n)
 }
 
 // memmove copies n bytes from "from" to "to".
@@ -80,8 +93,25 @@ func reflect_memmove(to, from unsafe.Pointer, n uintptr) {
 // exported value for testing
 var hashLoad = loadFactor
 
-// in asm_*.s
-func fastrand1() uint32
+//go:nosplit
+func fastrand() uint32 {
+	mp := getg().m
+	fr := mp.fastrand
+	mx := uint32(int32(fr)>>31) & 0xa8888eef
+	fr = fr<<1 ^ mx
+	mp.fastrand = fr
+	return fr
+}
+
+//go:nosplit
+func fastrandn(n uint32) uint32 {
+	// This is similar to fastrand() % n, but faster.
+	// See http://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
+	return uint32(uint64(fastrand()) * uint64(n) >> 32)
+}
+
+//go:linkname sync_fastrand sync.fastrand
+func sync_fastrand() uint32 { return fastrand() }
 
 // in asm_*.s
 //go:noescape
@@ -90,7 +120,7 @@ func memequal(a, b unsafe.Pointer, size uintptr) bool
 // noescape hides a pointer from escape analysis.  noescape is
 // the identity function but escape analysis doesn't think the
 // output depends on the input.  noescape is inlined and currently
-// compiles down to a single xor instruction.
+// compiles down to zero instructions.
 // USE CAREFULLY!
 //go:nosplit
 func noescape(p unsafe.Pointer) unsafe.Pointer {
@@ -134,7 +164,7 @@ type neverCallThisFunction struct{}
 // This function must never be called directly. Call goexit1 instead.
 // gentraceback assumes that goexit terminates the stack. A direct
 // call on the stack will cause gentraceback to stop walking the stack
-// prematurely and if there are leftover stack barriers it may panic.
+// prematurely and if there is leftover state it may panic.
 func goexit(neverCallThisFunction)
 
 // Not all cgocallback_gofunc frames are actually cgocallback_gofunc,
@@ -161,9 +191,6 @@ func cgocallback_gofunc(fv uintptr, frame uintptr, framesize, ctxt uintptr)
 // Go supports or seems likely to ever support automatically enforce
 // data dependency ordering.
 func publicationBarrier()
-
-//go:noescape
-func setcallerpc(argp unsafe.Pointer, pc uintptr)
 
 // getcallerpc returns the program counter (PC) of its caller's caller.
 // getcallersp returns the stack pointer (SP) of its caller's caller.
@@ -196,8 +223,10 @@ func setcallerpc(argp unsafe.Pointer, pc uintptr)
 //go:noescape
 func getcallerpc(argp unsafe.Pointer) uintptr
 
-//go:noescape
-func getcallersp(argp unsafe.Pointer) uintptr
+//go:nosplit
+func getcallersp(argp unsafe.Pointer) uintptr {
+	return uintptr(argp) - sys.MinFrameSize
+}
 
 //go:noescape
 func asmcgocall(fn, arg unsafe.Pointer) int32
@@ -206,14 +235,8 @@ func asmcgocall(fn, arg unsafe.Pointer) int32
 const _NoArgs = ^uintptr(0)
 
 func morestack()
+func morestack_noctxt()
 func rt0_go()
-
-// stackBarrier records that the stack has been unwound past a certain
-// point. It is installed over a return PC on the stack. It must
-// retrieve the original return PC from g.stkbuf, increment
-// g.stkbufPos to record that the barrier was hit, and jump to the
-// original return PC.
-func stackBarrier()
 
 // return0 is a stub used to return 0 from deferproc.
 // It is called at the very end of deferproc to signal
@@ -222,37 +245,34 @@ func stackBarrier()
 // in asm_*.s
 func return0()
 
-//go:linkname time_now time.now
-func time_now() (sec int64, nsec int32)
-
 // in asm_*.s
 // not called directly; definitions here supply type information for traceback.
-func call32(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call64(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call128(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call256(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call512(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call1024(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call2048(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call4096(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call8192(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call16384(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call32768(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call65536(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call131072(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call262144(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call524288(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call1048576(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call2097152(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call4194304(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call8388608(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call16777216(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call33554432(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call67108864(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call134217728(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call268435456(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call536870912(fn, arg unsafe.Pointer, n, retoffset uint32)
-func call1073741824(fn, arg unsafe.Pointer, n, retoffset uint32)
+func call32(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call64(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call128(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call256(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call512(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call1024(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call2048(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call4096(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call8192(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call16384(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call32768(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call65536(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call131072(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call262144(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call524288(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call1048576(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call2097152(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call4194304(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call8388608(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call16777216(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call33554432(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call67108864(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call134217728(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call268435456(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call536870912(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
+func call1073741824(typ, fn, arg unsafe.Pointer, n, retoffset uint32)
 
 func systemstack_switch()
 
@@ -261,11 +281,6 @@ func prefetcht1(addr uintptr)
 func prefetcht2(addr uintptr)
 func prefetchnta(addr uintptr)
 
-func unixnanotime() int64 {
-	sec, nsec := time_now()
-	return sec*1e9 + int64(nsec)
-}
-
 // round n up to a multiple of a.  a must be a power of 2.
 func round(n, a uintptr) uintptr {
 	return (n + a - 1) &^ (a - 1)
@@ -273,3 +288,6 @@ func round(n, a uintptr) uintptr {
 
 // checkASM returns whether assembly runtime checks have passed.
 func checkASM() bool
+
+func memequal_varlen(a, b unsafe.Pointer) bool
+func eqstring(s1, s2 string) bool

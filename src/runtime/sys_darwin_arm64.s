@@ -151,7 +151,7 @@ TEXT runtime·setitimer(SB),NOSPLIT,$0
 	SVC	$0x80
 	RET
 
-TEXT time·now(SB),NOSPLIT,$40-12
+TEXT runtime·walltime(SB),NOSPLIT,$40-12
 	MOVD	RSP, R0	// timeval
 	MOVD	R0, R9	// this is how dyld calls gettimeofday
 	MOVW	$0, R1	// zone
@@ -271,7 +271,7 @@ ret:
 	B	runtime·exit(SB)
 
 TEXT runtime·sigprocmask(SB),NOSPLIT,$0
-	MOVW	sig+0(FP), R0
+	MOVW	how+0(FP), R0
 	MOVD	new+8(FP), R1
 	MOVD	old+16(FP), R2
 	MOVW	$SYS_pthread_sigmask, R16

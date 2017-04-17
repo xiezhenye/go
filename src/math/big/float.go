@@ -14,6 +14,7 @@ package big
 import (
 	"fmt"
 	"math"
+	"math/bits"
 )
 
 const debugFloat = false // enable for debugging
@@ -97,7 +98,7 @@ const (
 // the slice may (but doesn't have to) be shorter if the mantissa contains
 // trailing 0 bits. x.mant is normalized if the msb of x.mant == 1 (i.e.,
 // the msb is shifted all the way "to the left"). Thus, if the mantissa has
-// trailing 0 bits or x.prec is not a multiple of the the Word size _W,
+// trailing 0 bits or x.prec is not a multiple of the Word size _W,
 // x.mant[0] has trailing zero bits. The msb of the mantissa corresponds
 // to the value 0.5; the exponent x.exp shifts the binary point as needed.
 //
@@ -498,8 +499,8 @@ func (z *Float) setBits64(neg bool, x uint64) *Float {
 	}
 	// x != 0
 	z.form = finite
-	s := nlz64(x)
-	z.mant = z.mant.setUint64(x << s)
+	s := bits.LeadingZeros64(x)
+	z.mant = z.mant.setUint64(x << uint(s))
 	z.exp = int32(64 - s) // always fits
 	if z.prec < 64 {
 		z.round(0)
@@ -1210,20 +1211,30 @@ func (z *Float) uadd(x, y *Float) {
 	ex := int64(x.exp) - int64(len(x.mant))*_W
 	ey := int64(y.exp) - int64(len(y.mant))*_W
 
+	al := alias(z.mant, x.mant) || alias(z.mant, y.mant)
+
 	// TODO(gri) having a combined add-and-shift primitive
 	//           could make this code significantly faster
 	switch {
 	case ex < ey:
-		// cannot re-use z.mant w/o testing for aliasing
-		t := nat(nil).shl(y.mant, uint(ey-ex))
-		z.mant = z.mant.add(x.mant, t)
+		if al {
+			t := nat(nil).shl(y.mant, uint(ey-ex))
+			z.mant = z.mant.add(x.mant, t)
+		} else {
+			z.mant = z.mant.shl(y.mant, uint(ey-ex))
+			z.mant = z.mant.add(x.mant, z.mant)
+		}
 	default:
 		// ex == ey, no shift needed
 		z.mant = z.mant.add(x.mant, y.mant)
 	case ex > ey:
-		// cannot re-use z.mant w/o testing for aliasing
-		t := nat(nil).shl(x.mant, uint(ex-ey))
-		z.mant = z.mant.add(t, y.mant)
+		if al {
+			t := nat(nil).shl(x.mant, uint(ex-ey))
+			z.mant = z.mant.add(t, y.mant)
+		} else {
+			z.mant = z.mant.shl(x.mant, uint(ex-ey))
+			z.mant = z.mant.add(z.mant, y.mant)
+		}
 		ex = ey
 	}
 	// len(z.mant) > 0
@@ -1247,18 +1258,28 @@ func (z *Float) usub(x, y *Float) {
 	ex := int64(x.exp) - int64(len(x.mant))*_W
 	ey := int64(y.exp) - int64(len(y.mant))*_W
 
+	al := alias(z.mant, x.mant) || alias(z.mant, y.mant)
+
 	switch {
 	case ex < ey:
-		// cannot re-use z.mant w/o testing for aliasing
-		t := nat(nil).shl(y.mant, uint(ey-ex))
-		z.mant = t.sub(x.mant, t)
+		if al {
+			t := nat(nil).shl(y.mant, uint(ey-ex))
+			z.mant = t.sub(x.mant, t)
+		} else {
+			z.mant = z.mant.shl(y.mant, uint(ey-ex))
+			z.mant = z.mant.sub(x.mant, z.mant)
+		}
 	default:
 		// ex == ey, no shift needed
 		z.mant = z.mant.sub(x.mant, y.mant)
 	case ex > ey:
-		// cannot re-use z.mant w/o testing for aliasing
-		t := nat(nil).shl(x.mant, uint(ex-ey))
-		z.mant = t.sub(t, y.mant)
+		if al {
+			t := nat(nil).shl(x.mant, uint(ex-ey))
+			z.mant = t.sub(t, y.mant)
+		} else {
+			z.mant = z.mant.shl(x.mant, uint(ex-ey))
+			z.mant = z.mant.sub(z.mant, y.mant)
+		}
 		ex = ey
 	}
 

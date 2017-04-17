@@ -1,5 +1,5 @@
 // Inferno utils/5c/5.out.h
-// http://code.google.com/p/inferno-os/source/browse/utils/5c/5.out.h
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/5c/5.out.h
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -243,9 +243,12 @@ const (
 	AMULU
 	ADIVU
 	AMUL
+	AMMUL
 	ADIV
 	AMOD
 	AMODU
+	ADIVHW
+	ADIVUHW
 
 	AMOVB
 	AMOVBS
@@ -261,6 +264,9 @@ const (
 	ARFE
 	ASWI
 	AMULA
+	AMULS
+	AMMULA
+	AMMULS
 
 	AWORD
 
@@ -281,11 +287,17 @@ const (
 	APLD
 
 	ACLZ
+	AREV
+	AREV16
+	AREVSH
+	ARBIT
 
 	AMULWT
 	AMULWB
+	AMULBB
 	AMULAWT
 	AMULAWB
+	AMULABB
 
 	ADATABUNDLE
 	ADATABUNDLEEND

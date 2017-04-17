@@ -6,7 +6,9 @@
 // the old assembler's (7a's) grammar and hand-writing complete
 // instructions for each rule, to guarantee we cover the same space.
 
-TEXT	foo(SB), 7, $-8
+#include "../../../../../runtime/textflag.h"
+
+TEXT	foo(SB), DUPOK|NOSPLIT, $-8
 
 //
 // ADD
@@ -16,7 +18,6 @@ TEXT	foo(SB), 7, $-8
 //		outcode($1, &$2, $4, &$6);
 //	}
 // imsr comes from the old 7a, we only support immediates and registers
-// at the moment, no shifted registers.
 	ADDW	$1, R2, R3
 	ADDW	R1, R2, R3
 	ADDW	R1, ZR, R3
@@ -24,6 +25,10 @@ TEXT	foo(SB), 7, $-8
 	ADD	R1, R2, R3
 	ADD	R1, ZR, R3
 	ADD	$1, R2, R3
+	ADD	R1>>11, R2, R3
+	ADD	R1<<22, R2, R3
+	ADD	R1->33, R2, R3
+	AND	R1@>33, R2, R3
 
 //	LTYPE1 imsr ',' spreg ','
 //	{
@@ -37,6 +42,19 @@ TEXT	foo(SB), 7, $-8
 	ADDW	R1, R2
 	ADD	$1, R2
 	ADD	R1, R2
+	ADD	R1>>11, R2
+	ADD	R1<<22, R2
+	ADD	R1->33, R2
+	AND	R1@>33, R2
+
+// logical ops
+// make sure constants get encoded into an instruction when it could
+	AND	$(1<<63), R1   // AND	$-9223372036854775808, R1 // 21004192
+	AND	$(1<<63-1), R1 // AND	$9223372036854775807, R1  // 21f84092
+	ORR	$(1<<63), R1   // ORR	$-9223372036854775808, R1 // 210041b2
+	ORR	$(1<<63-1), R1 // ORR	$9223372036854775807, R1  // 21f840b2
+	EOR	$(1<<63), R1   // EOR	$-9223372036854775808, R1 // 210041d2
+	EOR	$(1<<63-1), R1 // EOR	$9223372036854775807, R1  // 21f840d2
 
 //
 // CLS
@@ -118,7 +136,9 @@ TEXT	foo(SB), 7, $-8
 //	}
 	CMP	$3, R2
 	CMP	R1, R2
-
+	CMP	R1->11, R2
+	CMP	R1>>22, R2
+	CMP	R1<<33, R2
 //
 // CBZ
 //
@@ -257,6 +277,8 @@ again:
 	B	foo(SB) // JMP foo(SB)
 	BL	foo(SB) // CALL foo(SB)
 	BEQ	2(PC)
+	TBZ	$1, R1, 2(PC)
+	TBNZ	$2, R2, 2(PC)
 	JMP	foo(SB)
 	CALL	foo(SB)
 

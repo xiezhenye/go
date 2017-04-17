@@ -76,8 +76,9 @@ type Context struct {
 	// If IsDir is nil, Import calls os.Stat and uses the result's IsDir method.
 	IsDir func(path string) bool
 
-	// HasSubdir reports whether dir is a subdirectory of
-	// (perhaps multiple levels below) root.
+	// HasSubdir reports whether dir is lexically a subdirectory of
+	// root, perhaps multiple levels below. It does not try to check
+	// whether dir exists.
 	// If so, HasSubdir sets rel to a slash-separated path that
 	// can be joined to root to produce a path equivalent to dir.
 	// If HasSubdir is nil, Import uses an implementation built on
@@ -154,6 +155,7 @@ func (ctxt *Context) hasSubdir(root, dir string) (rel string, ok bool) {
 	return hasSubdir(rootSym, dirSym)
 }
 
+// hasSubdir reports if dir is within root by performing lexical analysis only.
 func hasSubdir(root, dir string) (rel string, ok bool) {
 	const sep = string(filepath.Separator)
 	root = filepath.Clean(root)
@@ -256,13 +258,32 @@ func (ctxt *Context) SrcDirs() []string {
 // if set, or else the compiled code's GOARCH, GOOS, and GOROOT.
 var Default Context = defaultContext()
 
+func defaultGOPATH() string {
+	env := "HOME"
+	if runtime.GOOS == "windows" {
+		env = "USERPROFILE"
+	} else if runtime.GOOS == "plan9" {
+		env = "home"
+	}
+	if home := os.Getenv(env); home != "" {
+		def := filepath.Join(home, "go")
+		if filepath.Clean(def) == filepath.Clean(runtime.GOROOT()) {
+			// Don't set the default GOPATH to GOROOT,
+			// as that will trigger warnings from the go tool.
+			return ""
+		}
+		return def
+	}
+	return ""
+}
+
 func defaultContext() Context {
 	var c Context
 
 	c.GOARCH = envOr("GOARCH", runtime.GOARCH)
 	c.GOOS = envOr("GOOS", runtime.GOOS)
 	c.GOROOT = pathpkg.Clean(runtime.GOROOT())
-	c.GOPATH = envOr("GOPATH", "")
+	c.GOPATH = envOr("GOPATH", defaultGOPATH())
 	c.Compiler = runtime.Compiler
 
 	// Each major Go release in the Go 1.x series should add a tag here.
@@ -270,9 +291,14 @@ func defaultContext() Context {
 	// in all releases >= Go 1.x. Code that requires Go 1.x or later should
 	// say "+build go1.x", and code that should only be built before Go 1.x
 	// (perhaps it is the stub to use in that case) should say "+build !go1.x".
-	c.ReleaseTags = []string{"go1.1", "go1.2", "go1.3", "go1.4", "go1.5", "go1.6", "go1.7"}
+	// NOTE: If you add to this list, also update the doc comment in doc.go.
+	c.ReleaseTags = []string{"go1.1", "go1.2", "go1.3", "go1.4", "go1.5", "go1.6", "go1.7", "go1.8", "go1.9"}
 
-	switch os.Getenv("CGO_ENABLED") {
+	env := os.Getenv("CGO_ENABLED")
+	if env == "" {
+		env = defaultCGO_ENABLED
+	}
+	switch env {
 	case "1":
 		c.CgoEnabled = true
 	case "0":
@@ -336,6 +362,11 @@ const (
 	// See golang.org/s/go15vendor for more information.
 	//
 	// Setting IgnoreVendor ignores vendor directories.
+	//
+	// In contrast to the package's ImportPath,
+	// the returned package's Imports, TestImports, and XTestImports
+	// are always the exact import paths from the source files:
+	// Import makes no attempt to resolve or check those paths.
 	IgnoreVendor
 )
 
@@ -381,15 +412,15 @@ type Package struct {
 	CgoPkgConfig []string // Cgo pkg-config directives
 
 	// Dependency information
-	Imports   []string                    // imports from GoFiles, CgoFiles
+	Imports   []string                    // import paths from GoFiles, CgoFiles
 	ImportPos map[string][]token.Position // line information for Imports
 
 	// Test information
 	TestGoFiles    []string                    // _test.go files in package
-	TestImports    []string                    // imports from TestGoFiles
+	TestImports    []string                    // import paths from TestGoFiles
 	TestImportPos  map[string][]token.Position // line information for TestImports
 	XTestGoFiles   []string                    // _test.go files outside package
-	XTestImports   []string                    // imports from XTestGoFiles
+	XTestImports   []string                    // import paths from XTestGoFiles
 	XTestImportPos map[string][]token.Position // line information for XTestImports
 }
 
@@ -497,6 +528,10 @@ func (ctxt *Context) Import(path string, srcDir string, mode ImportMode) (*Packa
 		}
 		if !ctxt.isAbsPath(path) {
 			p.Dir = ctxt.joinPath(srcDir, path)
+		}
+		if !ctxt.isDir(p.Dir) {
+			// package was not found
+			return p, fmt.Errorf("cannot find package %q in:\n\t%s", path, p.Dir)
 		}
 		// Determine canonical import path, if any.
 		// Exclude results where the import path would include /testdata/.
@@ -636,7 +671,7 @@ func (ctxt *Context) Import(path string, srcDir string, mode ImportMode) (*Packa
 			format = "\t%s"
 		}
 		if len(tried.gopath) == 0 {
-			paths = append(paths, "\t($GOPATH not set)")
+			paths = append(paths, "\t($GOPATH not set. For more details see: 'go help gopath')")
 		}
 		return p, fmt.Errorf("cannot find package %q in any of:\n%s", path, strings.Join(paths, "\n"))
 	}
@@ -687,7 +722,7 @@ Found:
 			p.InvalidGoFiles = append(p.InvalidGoFiles, name)
 		}
 
-		match, data, filename, err := ctxt.matchFile(p.Dir, name, true, allTags, &p.BinaryOnly)
+		match, data, filename, err := ctxt.matchFile(p.Dir, name, allTags, &p.BinaryOnly)
 		if err != nil {
 			badFile(err)
 			continue
@@ -1001,19 +1036,19 @@ func parseWord(data []byte) (word, rest []byte) {
 // MatchFile considers the name of the file and may use ctxt.OpenFile to
 // read some or all of the file's content.
 func (ctxt *Context) MatchFile(dir, name string) (match bool, err error) {
-	match, _, _, err = ctxt.matchFile(dir, name, false, nil, nil)
+	match, _, _, err = ctxt.matchFile(dir, name, nil, nil)
 	return
 }
 
 // matchFile determines whether the file with the given name in the given directory
 // should be included in the package being constructed.
 // It returns the data read from the file.
-// If returnImports is true and name denotes a Go program, matchFile reads
-// until the end of the imports (and returns that data) even though it only
-// considers text until the first non-comment.
+// If name denotes a Go program, matchFile reads until the end of the
+// imports (and returns that data) even though it only considers text
+// until the first non-comment.
 // If allTags is non-nil, matchFile records any encountered build tag
 // by setting allTags[tag] = true.
-func (ctxt *Context) matchFile(dir, name string, returnImports bool, allTags map[string]bool, binaryOnly *bool) (match bool, data []byte, filename string, err error) {
+func (ctxt *Context) matchFile(dir, name string, allTags map[string]bool, binaryOnly *bool) (match bool, data []byte, filename string, err error) {
 	if strings.HasPrefix(name, "_") ||
 		strings.HasPrefix(name, ".") {
 		return
@@ -1063,10 +1098,14 @@ func (ctxt *Context) matchFile(dir, name string, returnImports bool, allTags map
 	}
 
 	// Look for +build comments to accept or reject the file.
-	if !ctxt.shouldBuild(data, allTags, binaryOnly) && !ctxt.UseAllFiles {
+	var sawBinaryOnly bool
+	if !ctxt.shouldBuild(data, allTags, &sawBinaryOnly) && !ctxt.UseAllFiles {
 		return
 	}
 
+	if binaryOnly != nil && sawBinaryOnly {
+		*binaryOnly = true
+	}
 	match = true
 	return
 }
@@ -1110,9 +1149,8 @@ var binaryOnlyComment = []byte("//go:binary-only-package")
 //
 // marks the file as applicable only on Windows and Linux.
 //
-// If shouldBuild finds a //go:binary-only-package comment in a file that
-// should be built, it sets *binaryOnly to true. Otherwise it does
-// not change *binaryOnly.
+// If shouldBuild finds a //go:binary-only-package comment in the file,
+// it sets *binaryOnly to true. Otherwise it does not change *binaryOnly.
 //
 func (ctxt *Context) shouldBuild(content []byte, allTags map[string]bool, binaryOnly *bool) bool {
 	sawBinaryOnly := false
@@ -1282,7 +1320,8 @@ func expandSrcDir(str string, srcdir string) (string, bool) {
 // We never pass these arguments to a shell (just to programs we construct argv for), so this should be okay.
 // See golang.org/issue/6038.
 // The @ is for OS X. See golang.org/issue/13720.
-const safeString = "+-.,/0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz:$@"
+// The % is for Jenkins. See golang.org/issue/16959.
+const safeString = "+-.,/0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz:$@%"
 const safeSpaces = " "
 
 var safeBytes = []byte(safeSpaces + safeString)

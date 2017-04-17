@@ -88,6 +88,9 @@ func TestDecodeWord(t *testing.T) {
 		{"=?UTF-8?Q?A=B?=", "", true},
 		{"=?UTF-8?Q?=A?=", "", true},
 		{"=?UTF-8?A?A?=", "", true},
+		{"=????=", "", true},
+		{"=?UTF-8?Q??=", "", true},
+		{"=?UTF-8???=", "", true},
 	}
 
 	for _, test := range tests {

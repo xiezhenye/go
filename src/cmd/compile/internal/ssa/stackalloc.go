@@ -6,7 +6,10 @@
 
 package ssa
 
-import "fmt"
+import (
+	"cmd/internal/src"
+	"fmt"
+)
 
 type stackAllocState struct {
 	f *Func
@@ -32,12 +35,12 @@ type stackAllocState struct {
 }
 
 func newStackAllocState(f *Func) *stackAllocState {
-	s := f.Config.stackAllocState
+	s := f.Cache.stackAllocState
 	if s == nil {
 		return new(stackAllocState)
 	}
 	if s.f != nil {
-		f.Config.Fatalf(0, "newStackAllocState called without previous free")
+		f.fe.Fatalf(src.NoXPos, "newStackAllocState called without previous free")
 	}
 	return s
 }
@@ -58,7 +61,7 @@ func putStackAllocState(s *stackAllocState) {
 	for i := range s.used {
 		s.used[i] = false
 	}
-	s.f.Config.stackAllocState = s
+	s.f.Cache.stackAllocState = s
 	s.f = nil
 	s.live = nil
 	s.nArgSlot, s.nNotNeed, s.nNamedSlot, s.nReuse, s.nAuto, s.nSelfInterfere = 0, 0, 0, 0, 0, 0
@@ -243,7 +246,7 @@ func (s *stackAllocState) stackalloc() {
 			// If there is no unused stack slot, allocate a new one.
 			if i == len(locs) {
 				s.nAuto++
-				locs = append(locs, LocalSlot{N: f.Config.fe.Auto(v.Type), Type: v.Type, Off: 0})
+				locs = append(locs, LocalSlot{N: f.fe.Auto(v.Pos, v.Type), Type: v.Type, Off: 0})
 				locations[v.Type] = locs
 			}
 			// Use the stack variable at that index for v.
@@ -273,7 +276,7 @@ func (s *stackAllocState) computeLive(spillLive [][]ID) {
 	// Instead of iterating over f.Blocks, iterate over their postordering.
 	// Liveness information flows backward, so starting at the end
 	// increases the probability that we will stabilize quickly.
-	po := postorder(s.f)
+	po := s.f.postorder()
 	for {
 		changed := false
 		for _, b := range po {

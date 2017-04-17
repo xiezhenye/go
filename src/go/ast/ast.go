@@ -317,7 +317,7 @@ type (
 		Fun      Expr      // function expression
 		Lparen   token.Pos // position of "("
 		Args     []Expr    // function arguments; or nil
-		Ellipsis token.Pos // position of "...", if any
+		Ellipsis token.Pos // position of "..." (token.NoPos if there is no "...")
 		Rparen   token.Pos // position of ")"
 	}
 
@@ -848,6 +848,7 @@ type (
 	TypeSpec struct {
 		Doc     *CommentGroup // associated documentation; or nil
 		Name    *Ident        // type name
+		Assign  token.Pos     // position of '=', if any
 		Type    Expr          // *Ident, *ParenExpr, *SelectorExpr, *StarExpr, or any of the *XxxTypes
 		Comment *CommentGroup // line comments; or nil
 	}
@@ -902,7 +903,7 @@ type (
 
 	// A GenDecl node (generic declaration node) represents an import,
 	// constant, type or variable declaration. A valid Lparen position
-	// (Lparen.Line > 0) indicates a parenthesized declaration.
+	// (Lparen.IsValid()) indicates a parenthesized declaration.
 	//
 	// Relationship between Tok value and Specs element type:
 	//

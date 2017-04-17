@@ -7,9 +7,10 @@ package expvar
 import (
 	"bytes"
 	"encoding/json"
-	"math"
+	"fmt"
 	"net"
 	"net/http/httptest"
+	"reflect"
 	"runtime"
 	"strconv"
 	"sync"
@@ -37,8 +38,8 @@ func TestNil(t *testing.T) {
 func TestInt(t *testing.T) {
 	RemoveAll()
 	reqs := NewInt("requests")
-	if reqs.i != 0 {
-		t.Errorf("reqs.i = %v, want 0", reqs.i)
+	if i := reqs.Value(); i != 0 {
+		t.Errorf("reqs.Value() = %v, want 0", i)
 	}
 	if reqs != Get("requests").(*Int) {
 		t.Errorf("Get() failed.")
@@ -46,8 +47,8 @@ func TestInt(t *testing.T) {
 
 	reqs.Add(1)
 	reqs.Add(3)
-	if reqs.i != 4 {
-		t.Errorf("reqs.i = %v, want 4", reqs.i)
+	if i := reqs.Value(); i != 4 {
+		t.Errorf("reqs.Value() = %v, want 4", i)
 	}
 
 	if s := reqs.String(); s != "4" {
@@ -55,8 +56,8 @@ func TestInt(t *testing.T) {
 	}
 
 	reqs.Set(-2)
-	if reqs.i != -2 {
-		t.Errorf("reqs.i = %v, want -2", reqs.i)
+	if i := reqs.Value(); i != -2 {
+		t.Errorf("reqs.Value() = %v, want -2", i)
 	}
 }
 
@@ -80,10 +81,6 @@ func BenchmarkIntSet(b *testing.B) {
 	})
 }
 
-func (v *Float) val() float64 {
-	return math.Float64frombits(atomic.LoadUint64(&v.f))
-}
-
 func TestFloat(t *testing.T) {
 	RemoveAll()
 	reqs := NewFloat("requests-float")
@@ -96,8 +93,8 @@ func TestFloat(t *testing.T) {
 
 	reqs.Add(1.5)
 	reqs.Add(1.25)
-	if v := reqs.val(); v != 2.75 {
-		t.Errorf("reqs.val() = %v, want 2.75", v)
+	if v := reqs.Value(); v != 2.75 {
+		t.Errorf("reqs.Value() = %v, want 2.75", v)
 	}
 
 	if s := reqs.String(); s != "2.75" {
@@ -105,8 +102,8 @@ func TestFloat(t *testing.T) {
 	}
 
 	reqs.Add(-2)
-	if v := reqs.val(); v != 0.75 {
-		t.Errorf("reqs.val() = %v, want 0.75", v)
+	if v := reqs.Value(); v != 0.75 {
+		t.Errorf("reqs.Value() = %v, want 0.75", v)
 	}
 }
 
@@ -133,17 +130,16 @@ func BenchmarkFloatSet(b *testing.B) {
 func TestString(t *testing.T) {
 	RemoveAll()
 	name := NewString("my-name")
-	if name.s != "" {
-		t.Errorf("name.s = %q, want \"\"", name.s)
+	if name.Value() != "" {
+		t.Errorf("name.Value() = %q, want \"\"", name.s)
 	}
 
 	name.Set("Mike")
-	if name.s != "Mike" {
-		t.Errorf("name.s = %q, want \"Mike\"", name.s)
-	}
-
 	if s, want := name.String(), `"Mike"`; s != want {
 		t.Errorf("from %q, name.String() = %q, want %q", name.s, s, want)
+	}
+	if s, want := name.Value(), "Mike"; s != want {
+		t.Errorf("from %q, name.Value() = %q, want %q", name.s, s, want)
 	}
 
 	// Make sure we produce safe JSON output.
@@ -171,13 +167,13 @@ func TestMapCounter(t *testing.T) {
 	colors.Add("red", 2)
 	colors.Add("blue", 4)
 	colors.AddFloat(`green "midori"`, 4.125)
-	if x := colors.m["red"].(*Int).i; x != 3 {
+	if x := colors.Get("red").(*Int).Value(); x != 3 {
 		t.Errorf("colors.m[\"red\"] = %v, want 3", x)
 	}
-	if x := colors.m["blue"].(*Int).i; x != 4 {
+	if x := colors.Get("blue").(*Int).Value(); x != 4 {
 		t.Errorf("colors.m[\"blue\"] = %v, want 4", x)
 	}
-	if x := colors.m[`green "midori"`].(*Float).val(); x != 4.125 {
+	if x := colors.Get(`green "midori"`).(*Float).Value(); x != 4.125 {
 		t.Errorf("colors.m[`green \"midori\"] = %v, want 4.125", x)
 	}
 
@@ -215,24 +211,117 @@ func BenchmarkMapSet(b *testing.B) {
 	})
 }
 
-func BenchmarkMapAddSame(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := new(Map).Init()
-		m.Add("red", 1)
-		m.Add("red", 1)
-		m.Add("red", 1)
-		m.Add("red", 1)
+func BenchmarkMapSetDifferent(b *testing.B) {
+	procKeys := make([][]string, runtime.GOMAXPROCS(0))
+	for i := range procKeys {
+		keys := make([]string, 4)
+		for j := range keys {
+			keys[j] = fmt.Sprint(i, j)
+		}
+		procKeys[i] = keys
 	}
+
+	m := new(Map).Init()
+	v := new(Int)
+	b.ResetTimer()
+
+	var n int32
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(atomic.AddInt32(&n, 1)-1) % len(procKeys)
+		keys := procKeys[i]
+
+		for pb.Next() {
+			for _, k := range keys {
+				m.Set(k, v)
+			}
+		}
+	})
+}
+
+func BenchmarkMapSetString(b *testing.B) {
+	m := new(Map).Init()
+
+	v := new(String)
+	v.Set("Hello, !")
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.Set("red", v)
+		}
+	})
+}
+
+func BenchmarkMapAddSame(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m := new(Map).Init()
+			m.Add("red", 1)
+			m.Add("red", 1)
+			m.Add("red", 1)
+			m.Add("red", 1)
+		}
+	})
 }
 
 func BenchmarkMapAddDifferent(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		m := new(Map).Init()
-		m.Add("red", 1)
-		m.Add("blue", 1)
-		m.Add("green", 1)
-		m.Add("yellow", 1)
+	procKeys := make([][]string, runtime.GOMAXPROCS(0))
+	for i := range procKeys {
+		keys := make([]string, 4)
+		for j := range keys {
+			keys[j] = fmt.Sprint(i, j)
+		}
+		procKeys[i] = keys
 	}
+
+	b.ResetTimer()
+
+	var n int32
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(atomic.AddInt32(&n, 1)-1) % len(procKeys)
+		keys := procKeys[i]
+
+		for pb.Next() {
+			m := new(Map).Init()
+			for _, k := range keys {
+				m.Add(k, 1)
+			}
+		}
+	})
+}
+
+func BenchmarkMapAddSameSteadyState(b *testing.B) {
+	m := new(Map).Init()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			m.Add("red", 1)
+		}
+	})
+}
+
+func BenchmarkMapAddDifferentSteadyState(b *testing.B) {
+	procKeys := make([][]string, runtime.GOMAXPROCS(0))
+	for i := range procKeys {
+		keys := make([]string, 4)
+		for j := range keys {
+			keys[j] = fmt.Sprint(i, j)
+		}
+		procKeys[i] = keys
+	}
+
+	m := new(Map).Init()
+	b.ResetTimer()
+
+	var n int32
+	b.RunParallel(func(pb *testing.PB) {
+		i := int(atomic.AddInt32(&n, 1)-1) % len(procKeys)
+		keys := procKeys[i]
+
+		for pb.Next() {
+			for _, k := range keys {
+				m.Add(k, 1)
+			}
+		}
+	})
 }
 
 func TestFunc(t *testing.T) {
@@ -241,6 +330,9 @@ func TestFunc(t *testing.T) {
 	f := Func(func() interface{} { return x })
 	if s, exp := f.String(), `["a","b"]`; s != exp {
 		t.Errorf(`f.String() = %q, want %q`, s, exp)
+	}
+	if v := f.Value(); !reflect.DeepEqual(v, x) {
+		t.Errorf(`f.Value() = %q, want %q`, v, x)
 	}
 
 	x = 17

@@ -171,7 +171,7 @@ func BenchmarkEncodeInt32Slice(b *testing.B) {
 	enc := NewEncoder(&buf)
 	a := make([]int32, 1000)
 	for i := range a {
-		a[i] = 1234
+		a[i] = int32(i * 100)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -359,6 +359,31 @@ func BenchmarkDecodeInterfaceSlice(b *testing.B) {
 		bbuf.reset()
 		dec := NewDecoder(&bbuf)
 		err := dec.Decode(&x)
+		if err != nil {
+			b.Fatal(i, err)
+		}
+	}
+}
+
+func BenchmarkDecodeMap(b *testing.B) {
+	count := 10000
+	m := make(map[int]int, count)
+	for i := 0; i < count; i++ {
+		m[i] = i
+	}
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf)
+	err := enc.Encode(m)
+	if err != nil {
+		b.Fatal(err)
+	}
+	bbuf := benchmarkBuf{data: buf.Bytes()}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rm := make(map[int]int, 0)
+		bbuf.reset()
+		dec := NewDecoder(&bbuf)
+		err := dec.Decode(&rm)
 		if err != nil {
 			b.Fatal(i, err)
 		}

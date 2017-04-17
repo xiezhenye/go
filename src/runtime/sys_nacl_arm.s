@@ -196,20 +196,20 @@ TEXT runtime·mmap(SB),NOSPLIT,$8
 	MOVW	R0, ret+24(FP)
 	RET
 
-TEXT time·now(SB),NOSPLIT,$16
+TEXT runtime·walltime(SB),NOSPLIT,$16
 	MOVW	$0, R0 // real time clock
 	MOVW	$4(R13), R1
 	NACL_SYSCALL(SYS_clock_gettime)
 	MOVW	4(R13), R0 // low 32-bit sec
 	MOVW	8(R13), R1 // high 32-bit sec
 	MOVW	12(R13), R2 // nsec
-	MOVW	R0, sec+0(FP)
-	MOVW	R1, sec+4(FP)
-	MOVW	R2, sec+8(FP)
+	MOVW	R0, sec_lo+0(FP)
+	MOVW	R1, sec_hi+4(FP)
+	MOVW	R2, nsec+8(FP)
 	RET
 
 TEXT syscall·now(SB),NOSPLIT,$0
-	B time·now(SB)
+	B runtime·walltime(SB)
 
 TEXT runtime·nacl_clock_gettime(SB),NOSPLIT,$0
 	MOVW	arg1+0(FP), R0
@@ -303,8 +303,8 @@ TEXT runtime·nacl_sysinfo(SB),NOSPLIT,$16
 
 // func getRandomData([]byte)
 TEXT runtime·getRandomData(SB),NOSPLIT,$0-12
-	MOVW buf+0(FP), R0
-	MOVW len+4(FP), R1
+	MOVW arg_base+0(FP), R0
+	MOVW arg_len+4(FP), R1
 	NACL_SYSCALL(SYS_get_random_bytes)
 	RET
 

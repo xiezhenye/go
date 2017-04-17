@@ -7,6 +7,8 @@
 package syscall_test
 
 import (
+	"flag"
+	"fmt"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -162,6 +164,12 @@ func TestUnshare(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	orig, err := ioutil.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origLines := strings.Split(strings.TrimSpace(string(orig)), "\n")
+
 	cmd := exec.Command("cat", path)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Unshareflags: syscall.CLONE_NEWNET,
@@ -178,8 +186,8 @@ func TestUnshare(t *testing.T) {
 	}
 
 	lines := strings.Split(sout, "\n")
-	if len(lines) != 3 {
-		t.Fatalf("Expected 3 lines of output, got %d", len(lines))
+	if len(lines) >= len(origLines) {
+		t.Fatalf("Got %d lines of output, want <%d", len(lines), len(origLines))
 	}
 }
 
@@ -199,9 +207,10 @@ func TestGroupCleanup(t *testing.T) {
 		t.Fatalf("Cmd failed with err %v, output: %s", err, out)
 	}
 	strOut := strings.TrimSpace(string(out))
-	expected := "uid=0(root) gid=0(root) groups=0(root)"
+	expected := "uid=0(root) gid=0(root)"
 	// Just check prefix because some distros reportedly output a
 	// context parameter; see https://golang.org/issue/16224.
+	// Alpine does not output groups; see https://golang.org/issue/19938.
 	if !strings.HasPrefix(strOut, expected) {
 		t.Errorf("id command output: %q, expected prefix: %q", strOut, expected)
 	}
@@ -239,6 +248,7 @@ func TestGroupCleanupUserNamespace(t *testing.T) {
 		"uid=0(root) gid=0(root) groups=0(root),65534(nobody)",
 		"uid=0(root) gid=0(root) groups=0(root),65534(nogroup)",
 		"uid=0(root) gid=0(root) groups=0(root),65534",
+		"uid=0(root) gid=0(root) groups=0(root),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody),65534(nobody)", // Alpine; see https://golang.org/issue/19938
 	}
 	for _, e := range expected {
 		if strOut == e {
@@ -246,4 +256,67 @@ func TestGroupCleanupUserNamespace(t *testing.T) {
 		}
 	}
 	t.Errorf("id command output: %q, expected one of %q", strOut, expected)
+}
+
+// TestUnshareHelperProcess isn't a real test. It's used as a helper process
+// for TestUnshareMountNameSpace.
+func TestUnshareMountNameSpaceHelper(*testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	defer os.Exit(0)
+
+	if err := syscall.Mount("none", flag.Args()[0], "proc", 0, ""); err != nil {
+		fmt.Fprintf(os.Stderr, "unshare: mount %v failed: %v", os.Args, err)
+		os.Exit(2)
+	}
+}
+
+// Test for Issue 38471: unshare fails because systemd has forced / to be shared
+func TestUnshareMountNameSpace(t *testing.T) {
+	// Make sure we are running as root so we have permissions to use unshare
+	// and create a network namespace.
+	if os.Getuid() != 0 {
+		t.Skip("kernel prohibits unshare in unprivileged process, unless using user namespace")
+	}
+
+	// When running under the Go continuous build, skip tests for
+	// now when under Kubernetes. (where things are root but not quite)
+	// Both of these are our own environment variables.
+	// See Issue 12815.
+	if os.Getenv("GO_BUILDER_NAME") != "" && os.Getenv("IN_KUBERNETES") == "1" {
+		t.Skip("skipping test on Kubernetes-based builders; see Issue 12815")
+	}
+
+	d, err := ioutil.TempDir("", "unshare")
+	if err != nil {
+		t.Fatalf("tempdir: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestUnshareMountNameSpaceHelper", d)
+	cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS}
+
+	o, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(err.Error(), ": permission denied") {
+			t.Skipf("Skipping test (golang.org/issue/19698); unshare failed due to permissions: %s, %v", o, err)
+		}
+		t.Fatalf("unshare failed: %s, %v", o, err)
+	}
+
+	// How do we tell if the namespace was really unshared? It turns out
+	// to be simple: just try to remove the directory. If it's still mounted
+	// on the rm will fail with EBUSY. Then we have some cleanup to do:
+	// we must unmount it, then try to remove it again.
+
+	if err := os.Remove(d); err != nil {
+		t.Errorf("rmdir failed on %v: %v", d, err)
+		if err := syscall.Unmount(d, syscall.MNT_FORCE); err != nil {
+			t.Errorf("Can't unmount %v: %v", d, err)
+		}
+		if err := os.Remove(d); err != nil {
+			t.Errorf("rmdir after unmount failed on %v: %v", d, err)
+		}
+	}
 }

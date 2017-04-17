@@ -35,15 +35,14 @@ var traceback_env uint32
 //go:nosplit
 func gotraceback() (level int32, all, crash bool) {
 	_g_ := getg()
-	all = _g_.m.throwing > 0
-	if _g_.m.traceback != 0 {
-		level = int32(_g_.m.traceback)
-		return
-	}
 	t := atomic.Load(&traceback_cache)
 	crash = t&tracebackCrash != 0
-	all = all || t&tracebackAll != 0
-	level = int32(t >> tracebackShift)
+	all = _g_.m.throwing > 0 || t&tracebackAll != 0
+	if _g_.m.traceback != 0 {
+		level = int32(_g_.m.traceback)
+	} else {
+		level = int32(t >> tracebackShift)
+	}
 	return
 }
 
@@ -260,6 +259,12 @@ func check() {
 		throw("atomicor8")
 	}
 
+	m = [4]byte{0xff, 0xff, 0xff, 0xff}
+	atomic.And8(&m[1], 0x1)
+	if m[0] != 0xff || m[1] != 0x1 || m[2] != 0xff || m[3] != 0xff {
+		throw("atomicand8")
+	}
+
 	*(*uint64)(unsafe.Pointer(&j)) = ^uint64(0)
 	if j == j {
 		throw("float64nan")
@@ -313,22 +318,20 @@ type dbgVar struct {
 // existing int var for that value, which may
 // already have an initial value.
 var debug struct {
-	allocfreetrace    int32
-	cgocheck          int32
-	efence            int32
-	gccheckmark       int32
-	gcpacertrace      int32
-	gcshrinkstackoff  int32
-	gcstackbarrieroff int32
-	gcstackbarrierall int32
-	gcstoptheworld    int32
-	gctrace           int32
-	invalidptr        int32
-	sbrk              int32
-	scavenge          int32
-	scheddetail       int32
-	schedtrace        int32
-	wbshadow          int32
+	allocfreetrace   int32
+	cgocheck         int32
+	efence           int32
+	gccheckmark      int32
+	gcpacertrace     int32
+	gcshrinkstackoff int32
+	gcrescanstacks   int32
+	gcstoptheworld   int32
+	gctrace          int32
+	invalidptr       int32
+	sbrk             int32
+	scavenge         int32
+	scheddetail      int32
+	schedtrace       int32
 }
 
 var dbgvars = []dbgVar{
@@ -338,8 +341,7 @@ var dbgvars = []dbgVar{
 	{"gccheckmark", &debug.gccheckmark},
 	{"gcpacertrace", &debug.gcpacertrace},
 	{"gcshrinkstackoff", &debug.gcshrinkstackoff},
-	{"gcstackbarrieroff", &debug.gcstackbarrieroff},
-	{"gcstackbarrierall", &debug.gcstackbarrierall},
+	{"gcrescanstacks", &debug.gcrescanstacks},
 	{"gcstoptheworld", &debug.gcstoptheworld},
 	{"gctrace", &debug.gctrace},
 	{"invalidptr", &debug.invalidptr},
@@ -347,7 +349,6 @@ var dbgvars = []dbgVar{
 	{"scavenge", &debug.scavenge},
 	{"scheddetail", &debug.scheddetail},
 	{"schedtrace", &debug.schedtrace},
-	{"wbshadow", &debug.wbshadow},
 }
 
 func parsedebugvars() {
@@ -373,11 +374,15 @@ func parsedebugvars() {
 		// is int, not int32, and should only be updated
 		// if specified in GODEBUG.
 		if key == "memprofilerate" {
-			MemProfileRate = atoi(value)
+			if n, ok := atoi(value); ok {
+				MemProfileRate = n
+			}
 		} else {
 			for _, v := range dbgvars {
 				if v.name == key {
-					*v.value = int32(atoi(value))
+					if n, ok := atoi32(value); ok {
+						*v.value = n
+					}
 				}
 			}
 		}
@@ -385,10 +390,6 @@ func parsedebugvars() {
 
 	setTraceback(gogetenv("GOTRACEBACK"))
 	traceback_env = traceback_cache
-
-	if debug.gcstackbarrierall > 0 {
-		firstStackBarrierOffset = 0
-	}
 
 	// For cgocheck > 1, we turn on the write barrier at all times
 	// and check all pointer writes.
@@ -413,7 +414,10 @@ func setTraceback(level string) {
 	case "crash":
 		t = 2<<tracebackShift | tracebackAll | tracebackCrash
 	default:
-		t = uint32(atoi(level))<<tracebackShift | tracebackAll
+		t = tracebackAll
+		if n, ok := atoi(level); ok && n == int(uint32(n)) {
+			t |= uint32(n) << tracebackShift
+		}
 	}
 	// when C owns the process, simply exit'ing the process on fatal errors
 	// and panics is surprising. Be louder and abort instead.
@@ -477,11 +481,12 @@ func gomcache() *mcache {
 
 //go:linkname reflect_typelinks reflect.typelinks
 func reflect_typelinks() ([]unsafe.Pointer, [][]int32) {
-	sections := []unsafe.Pointer{unsafe.Pointer(firstmoduledata.types)}
-	ret := [][]int32{firstmoduledata.typelinks}
-	for datap := firstmoduledata.next; datap != nil; datap = datap.next {
-		sections = append(sections, unsafe.Pointer(datap.types))
-		ret = append(ret, datap.typelinks)
+	modules := activeModules()
+	sections := []unsafe.Pointer{unsafe.Pointer(modules[0].types)}
+	ret := [][]int32{modules[0].typelinks}
+	for _, md := range modules[1:] {
+		sections = append(sections, unsafe.Pointer(md.types))
+		ret = append(ret, md.typelinks)
 	}
 	return sections, ret
 }

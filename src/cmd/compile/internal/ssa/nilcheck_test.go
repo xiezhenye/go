@@ -40,8 +40,8 @@ func benchmarkNilCheckDeep(b *testing.B, depth int) {
 		Bloc("exit", Exit("mem")),
 	)
 
-	c := NewConfig("amd64", DummyFrontend{b}, nil, true)
-	fun := Fun(c, "entry", blocs...)
+	c := testConfig(b)
+	fun := c.Fun("entry", blocs...)
 
 	CheckFunc(fun.f)
 	b.SetBytes(int64(depth)) // helps for eyeballing linearity
@@ -49,7 +49,6 @@ func benchmarkNilCheckDeep(b *testing.B, depth int) {
 	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
-		domTree(fun.f)
 		nilcheckelim(fun.f)
 	}
 }
@@ -65,8 +64,8 @@ func isNilCheck(b *Block) bool {
 // TestNilcheckSimple verifies that a second repeated nilcheck is removed.
 func TestNilcheckSimple(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -84,7 +83,6 @@ func TestNilcheckSimple(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -103,8 +101,8 @@ func TestNilcheckSimple(t *testing.T) {
 // on the order of the dominees.
 func TestNilcheckDomOrder(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -122,7 +120,6 @@ func TestNilcheckDomOrder(t *testing.T) {
 			Goto("exit")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -140,8 +137,8 @@ func TestNilcheckDomOrder(t *testing.T) {
 // TestNilcheckAddr verifies that nilchecks of OpAddr constructed values are removed.
 func TestNilcheckAddr(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -156,7 +153,6 @@ func TestNilcheckAddr(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -174,8 +170,8 @@ func TestNilcheckAddr(t *testing.T) {
 // TestNilcheckAddPtr verifies that nilchecks of OpAddPtr constructed values are removed.
 func TestNilcheckAddPtr(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -191,7 +187,6 @@ func TestNilcheckAddPtr(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -210,8 +205,8 @@ func TestNilcheckAddPtr(t *testing.T) {
 // non-nil are removed.
 func TestNilcheckPhi(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -236,7 +231,6 @@ func TestNilcheckPhi(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -255,8 +249,8 @@ func TestNilcheckPhi(t *testing.T) {
 // are removed, but checks of different pointers are not.
 func TestNilcheckKeepRemove(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -278,7 +272,6 @@ func TestNilcheckKeepRemove(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -304,8 +297,8 @@ func TestNilcheckKeepRemove(t *testing.T) {
 // block are *not* removed.
 func TestNilcheckInFalseBranch(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -326,7 +319,6 @@ func TestNilcheckInFalseBranch(t *testing.T) {
 			Exit("mem")))
 
 	CheckFunc(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -356,8 +348,8 @@ func TestNilcheckInFalseBranch(t *testing.T) {
 // wil remove the generated nil check.
 func TestNilcheckUser(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -378,7 +370,6 @@ func TestNilcheckUser(t *testing.T) {
 	CheckFunc(fun.f)
 	// we need the opt here to rewrite the user nilcheck
 	opt(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check
@@ -396,8 +387,8 @@ func TestNilcheckUser(t *testing.T) {
 // TestNilcheckBug reproduces a bug in nilcheckelim found by compiling math/big
 func TestNilcheckBug(t *testing.T) {
 	ptrType := &TypeImpl{Size_: 8, Ptr: true, Name: "testptr"} // dummy for testing
-	c := NewConfig("amd64", DummyFrontend{t}, nil, true)
-	fun := Fun(c, "entry",
+	c := testConfig(t)
+	fun := c.Fun("entry",
 		Bloc("entry",
 			Valu("mem", OpInitMem, TypeMem, 0, nil),
 			Valu("sb", OpSB, TypeInvalid, 0, nil),
@@ -414,7 +405,7 @@ func TestNilcheckBug(t *testing.T) {
 			If("bool2", "extra", "exit")),
 		Bloc("extra",
 			// prevent fuse from eliminating this block
-			Valu("store", OpStore, TypeMem, 8, nil, "ptr1", "nilptr", "mem"),
+			Valu("store", OpStore, TypeMem, 0, ptrType, "ptr1", "nilptr", "mem"),
 			Goto("exit")),
 		Bloc("exit",
 			Valu("phi", OpPhi, TypeMem, 0, nil, "mem", "store"),
@@ -423,7 +414,6 @@ func TestNilcheckBug(t *testing.T) {
 	CheckFunc(fun.f)
 	// we need the opt here to rewrite the user nilcheck
 	opt(fun.f)
-	domTree(fun.f)
 	nilcheckelim(fun.f)
 
 	// clean up the removed nil check

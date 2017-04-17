@@ -5,26 +5,17 @@
 package ssa
 
 import (
+	"cmd/internal/obj"
+	"crypto/sha1"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-func applyRewrite(f *Func, rb func(*Block) bool, rv func(*Value, *Config) bool) {
+func applyRewrite(f *Func, rb blockRewriter, rv valueRewriter) {
 	// repeat rewrites until we find no more rewrites
-	var curb *Block
-	var curv *Value
-	defer func() {
-		if curb != nil {
-			curb.Fatalf("panic during rewrite of block %s\n", curb.LongString())
-		}
-		if curv != nil {
-			curv.Fatalf("panic during rewrite of value %s\n", curv.LongString())
-			// TODO(khr): print source location also
-		}
-	}()
-	config := f.Config
 	for {
 		change := false
 		for _, b := range f.Blocks {
@@ -33,11 +24,9 @@ func applyRewrite(f *Func, rb func(*Block) bool, rv func(*Value, *Config) bool) 
 					b.SetControl(b.Control.Args[0])
 				}
 			}
-			curb = b
 			if rb(b) {
 				change = true
 			}
-			curb = nil
 			for _, v := range b.Values {
 				change = phielimValue(v) || change
 
@@ -62,11 +51,9 @@ func applyRewrite(f *Func, rb func(*Block) bool, rv func(*Value, *Config) bool) 
 				}
 
 				// apply rewrite function
-				curv = v
-				if rv(v, config) {
+				if rv(v) {
 					change = true
 				}
-				curv = nil
 			}
 		}
 		if !change {
@@ -149,6 +136,174 @@ func canMergeSym(x, y interface{}) bool {
 	return x == nil || y == nil
 }
 
+// canMergeLoad reports whether the load can be merged into target without
+// invalidating the schedule.
+// It also checks that the other non-load argument x is something we
+// are ok with clobbering (all our current load+op instructions clobber
+// their input register).
+func canMergeLoad(target, load, x *Value) bool {
+	if target.Block.ID != load.Block.ID {
+		// If the load is in a different block do not merge it.
+		return false
+	}
+
+	// We can't merge the load into the target if the load
+	// has more than one use.
+	if load.Uses != 1 {
+		return false
+	}
+
+	// The register containing x is going to get clobbered.
+	// Don't merge if we still need the value of x.
+	// We don't have liveness information here, but we can
+	// approximate x dying with:
+	//  1) target is x's only use.
+	//  2) target is not in a deeper loop than x.
+	if x.Uses != 1 {
+		return false
+	}
+	loopnest := x.Block.Func.loopnest()
+	loopnest.calculateDepths()
+	if loopnest.depth(target.Block.ID) > loopnest.depth(x.Block.ID) {
+		return false
+	}
+
+	mem := load.MemoryArg()
+
+	// We need the load's memory arg to still be alive at target. That
+	// can't be the case if one of target's args depends on a memory
+	// state that is a successor of load's memory arg.
+	//
+	// For example, it would be invalid to merge load into target in
+	// the following situation because newmem has killed oldmem
+	// before target is reached:
+	//     load = read ... oldmem
+	//   newmem = write ... oldmem
+	//     arg0 = read ... newmem
+	//   target = add arg0 load
+	//
+	// If the argument comes from a different block then we can exclude
+	// it immediately because it must dominate load (which is in the
+	// same block as target).
+	var args []*Value
+	for _, a := range target.Args {
+		if a != load && a.Block.ID == target.Block.ID {
+			args = append(args, a)
+		}
+	}
+
+	// memPreds contains memory states known to be predecessors of load's
+	// memory state. It is lazily initialized.
+	var memPreds map[*Value]bool
+search:
+	for i := 0; len(args) > 0; i++ {
+		const limit = 100
+		if i >= limit {
+			// Give up if we have done a lot of iterations.
+			return false
+		}
+		v := args[len(args)-1]
+		args = args[:len(args)-1]
+		if target.Block.ID != v.Block.ID {
+			// Since target and load are in the same block
+			// we can stop searching when we leave the block.
+			continue search
+		}
+		if v.Op == OpPhi {
+			// A Phi implies we have reached the top of the block.
+			continue search
+		}
+		if v.Type.IsTuple() && v.Type.FieldType(1).IsMemory() {
+			// We could handle this situation however it is likely
+			// to be very rare.
+			return false
+		}
+		if v.Type.IsMemory() {
+			if memPreds == nil {
+				// Initialise a map containing memory states
+				// known to be predecessors of load's memory
+				// state.
+				memPreds = make(map[*Value]bool)
+				m := mem
+				const limit = 50
+				for i := 0; i < limit; i++ {
+					if m.Op == OpPhi {
+						break
+					}
+					if m.Block.ID != target.Block.ID {
+						break
+					}
+					if !m.Type.IsMemory() {
+						break
+					}
+					memPreds[m] = true
+					if len(m.Args) == 0 {
+						break
+					}
+					m = m.MemoryArg()
+				}
+			}
+
+			// We can merge if v is a predecessor of mem.
+			//
+			// For example, we can merge load into target in the
+			// following scenario:
+			//      x = read ... v
+			//    mem = write ... v
+			//   load = read ... mem
+			// target = add x load
+			if memPreds[v] {
+				continue search
+			}
+			return false
+		}
+		if len(v.Args) > 0 && v.Args[len(v.Args)-1] == mem {
+			// If v takes mem as an input then we know mem
+			// is valid at this point.
+			continue search
+		}
+		for _, a := range v.Args {
+			if target.Block.ID == a.Block.ID {
+				args = append(args, a)
+			}
+		}
+	}
+
+	return true
+}
+
+// isArg returns whether s is an arg symbol
+func isArg(s interface{}) bool {
+	_, ok := s.(*ArgSymbol)
+	return ok
+}
+
+// isAuto returns whether s is an auto symbol
+func isAuto(s interface{}) bool {
+	_, ok := s.(*AutoSymbol)
+	return ok
+}
+
+func fitsARM64Offset(off, align int64, sym interface{}) bool {
+	// only small offset (between -256 and 256) or offset that is a multiple of data size
+	// can be encoded in the instructions
+	// since this rewriting takes place before stack allocation, the offset to SP is unknown,
+	// so don't do it for args and locals with unaligned offset
+	if !is32Bit(off) {
+		return false
+	}
+	if align == 1 {
+		return true
+	}
+	return !isArg(sym) && (off%align == 0 || off < 256 && off > -256 && !isAuto(sym))
+}
+
+// isSameSym returns whether sym is the same as the given named symbol
+func isSameSym(sym interface{}, name string) bool {
+	s, ok := sym.(fmt.Stringer)
+	return ok && s.String() == name
+}
+
 // nlz returns the number of leading zeros.
 func nlz(x int64) int64 {
 	// log2(0) == 1, so nlz(0) == 64
@@ -170,7 +325,8 @@ func nto(x int64) int64 {
 	return ntz(^x)
 }
 
-// log2 returns logarithm in base of uint64(n), with log2(0) = -1.
+// log2 returns logarithm in base 2 of uint64(n), with log2(0) = -1.
+// Rounds down.
 func log2(n int64) (l int64) {
 	l = -1
 	x := uint64(n)
@@ -210,6 +366,21 @@ func is16Bit(n int64) bool {
 	return n == int64(int16(n))
 }
 
+// isU16Bit reports whether n can be represented as an unsigned 16 bit integer.
+func isU16Bit(n int64) bool {
+	return n == int64(uint16(n))
+}
+
+// isU32Bit reports whether n can be represented as an unsigned 32 bit integer.
+func isU32Bit(n int64) bool {
+	return n == int64(uint32(n))
+}
+
+// is20Bit reports whether n can be represented as a signed 20 bit integer.
+func is20Bit(n int64) bool {
+	return -(1<<19) <= n && n < (1<<19)
+}
+
 // b2i translates a boolean value to 0 or 1 for assigning to auxInt.
 func b2i(b bool) int64 {
 	if b {
@@ -236,6 +407,25 @@ func f2i(f float64) int64 {
 // uaddOvf returns true if unsigned a+b would overflow.
 func uaddOvf(a, b int64) bool {
 	return uint64(a)+uint64(b) < uint64(a)
+}
+
+// de-virtualize an InterCall
+// 'sym' is the symbol for the itab
+func devirt(v *Value, sym interface{}, offset int64) *obj.LSym {
+	f := v.Block.Func
+	ext, ok := sym.(*ExternSymbol)
+	if !ok {
+		return nil
+	}
+	lsym := f.fe.DerefItab(ext.Sym, offset)
+	if f.pass.debug > 0 {
+		if lsym != nil {
+			f.Warnl(v.Pos, "de-virtualizing call")
+		} else {
+			f.Warnl(v.Pos, "couldn't de-virtualize call")
+		}
+	}
+	return lsym
 }
 
 // isSamePtr reports whether p1 and p2 point to the same address.
@@ -332,6 +522,24 @@ func clobber(v *Value) bool {
 	return true
 }
 
+// noteRule is an easy way to track if a rule is matched when writing
+// new ones.  Make the rule of interest also conditional on
+//     noteRule("note to self: rule of interest matched")
+// and that message will print when the rule matches.
+func noteRule(s string) bool {
+	fmt.Println(s)
+	return true
+}
+
+// warnRule generates a compiler debug output with string s when
+// cond is true and the rule is fired.
+func warnRule(cond bool, v *Value, s string) bool {
+	if cond {
+		v.Block.Func.Warnl(v.Pos, s)
+	}
+	return true
+}
+
 // logRule logs the use of the rule s. This will only be enabled if
 // rewrite rules were generated with the -log option, see gen/rulegen.go.
 func logRule(s string) {
@@ -356,3 +564,78 @@ func logRule(s string) {
 }
 
 var ruleFile *os.File
+
+func min(x, y int64) int64 {
+	if x < y {
+		return x
+	}
+	return y
+}
+
+func experiment(f *Func) bool {
+	hstr := ""
+	for _, b := range sha1.Sum([]byte(f.Name)) {
+		hstr += fmt.Sprintf("%08b", b)
+	}
+	r := strings.HasSuffix(hstr, "00011")
+	_ = r
+	r = f.Name == "(*fmt).fmt_integer"
+	if r {
+		fmt.Printf("             enabled for %s\n", f.Name)
+	}
+	return r
+}
+
+func isConstZero(v *Value) bool {
+	switch v.Op {
+	case OpConstNil:
+		return true
+	case OpConst64, OpConst32, OpConst16, OpConst8, OpConstBool, OpConst32F, OpConst64F:
+		return v.AuxInt == 0
+	}
+	return false
+}
+
+// reciprocalExact64 reports whether 1/c is exactly representable.
+func reciprocalExact64(c float64) bool {
+	b := math.Float64bits(c)
+	man := b & (1<<52 - 1)
+	if man != 0 {
+		return false // not a power of 2, denormal, or NaN
+	}
+	exp := b >> 52 & (1<<11 - 1)
+	// exponent bias is 0x3ff.  So taking the reciprocal of a number
+	// changes the exponent to 0x7fe-exp.
+	switch exp {
+	case 0:
+		return false // ±0
+	case 0x7ff:
+		return false // ±inf
+	case 0x7fe:
+		return false // exponent is not representable
+	default:
+		return true
+	}
+}
+
+// reciprocalExact32 reports whether 1/c is exactly representable.
+func reciprocalExact32(c float32) bool {
+	b := math.Float32bits(c)
+	man := b & (1<<23 - 1)
+	if man != 0 {
+		return false // not a power of 2, denormal, or NaN
+	}
+	exp := b >> 23 & (1<<8 - 1)
+	// exponent bias is 0x7f.  So taking the reciprocal of a number
+	// changes the exponent to 0xfe-exp.
+	switch exp {
+	case 0:
+		return false // ±0
+	case 0xff:
+		return false // ±inf
+	case 0xfe:
+		return false // exponent is not representable
+	default:
+		return true
+	}
+}

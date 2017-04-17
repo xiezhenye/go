@@ -4,6 +4,8 @@
 
 package ssa
 
+import "cmd/internal/obj"
+
 // Stub implementation used for testing.
 type TypeImpl struct {
 	Size_   int64
@@ -44,12 +46,14 @@ func (t *TypeImpl) IsVoid() bool           { return false }
 func (t *TypeImpl) String() string         { return t.Name }
 func (t *TypeImpl) SimpleString() string   { return t.Name }
 func (t *TypeImpl) ElemType() Type         { return t.Elem_ }
-func (t *TypeImpl) PtrTo() Type            { panic("not implemented") }
+func (t *TypeImpl) PtrTo() Type            { return TypeBytePtr }
 func (t *TypeImpl) NumFields() int         { panic("not implemented") }
 func (t *TypeImpl) FieldType(i int) Type   { panic("not implemented") }
 func (t *TypeImpl) FieldOff(i int) int64   { panic("not implemented") }
 func (t *TypeImpl) FieldName(i int) string { panic("not implemented") }
 func (t *TypeImpl) NumElem() int64         { panic("not implemented") }
+func (t *TypeImpl) HasPointer() bool       { return t.Ptr }
+func (t *TypeImpl) Symbol() *obj.LSym      { panic("not implemented") }
 
 func (t *TypeImpl) Equal(u Type) bool {
 	x, ok := u.(*TypeImpl)

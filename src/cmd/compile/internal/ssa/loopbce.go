@@ -33,6 +33,7 @@ type indVar struct {
 // TODO: handle 32 bit operations
 func findIndVar(f *Func) []indVar {
 	var iv []indVar
+	sdom := f.sdom()
 
 nextb:
 	for _, b := range f.Blocks {
@@ -110,7 +111,7 @@ nextb:
 
 		// Second condition: b.Succs[entry] dominates nxt so that
 		// nxt is computed when inc < max, meaning nxt <= max.
-		if !f.sdom.isAncestorEq(b.Succs[entry].b, nxt.Block) {
+		if !sdom.isAncestorEq(b.Succs[entry].b, nxt.Block) {
 			// inc+ind can only be reached through the branch that enters the loop.
 			continue
 		}
@@ -138,9 +139,9 @@ nextb:
 
 		if f.pass.debug > 1 {
 			if min.Op == OpConst64 {
-				b.Func.Config.Warnl(b.Line, "Induction variable with minimum %d and increment %d", min.AuxInt, inc.AuxInt)
+				b.Func.Warnl(b.Pos, "Induction variable with minimum %d and increment %d", min.AuxInt, inc.AuxInt)
 			} else {
-				b.Func.Config.Warnl(b.Line, "Induction variable with non-const minimum and increment %d", inc.AuxInt)
+				b.Func.Warnl(b.Pos, "Induction variable with non-const minimum and increment %d", inc.AuxInt)
 			}
 		}
 
@@ -172,6 +173,7 @@ func loopbce(f *Func) {
 
 // removesBoundsChecks remove IsInBounds and IsSliceInBounds based on the induction variables.
 func removeBoundsChecks(f *Func, m map[*Value]indVar) {
+	sdom := f.sdom()
 	for _, b := range f.Blocks {
 		if b.Kind != BlockIf {
 			continue
@@ -200,10 +202,10 @@ func removeBoundsChecks(f *Func, m map[*Value]indVar) {
 				goto skip1
 			}
 
-			if iv, has := m[ind]; has && f.sdom.isAncestorEq(iv.entry, b) && isNonNegative(iv.min) {
+			if iv, has := m[ind]; has && sdom.isAncestorEq(iv.entry, b) && isNonNegative(iv.min) {
 				if v.Args[1] == iv.max {
 					if f.pass.debug > 0 {
-						f.Config.Warnl(b.Line, "Found redundant %s", v.Op)
+						f.Warnl(b.Pos, "Found redundant %s", v.Op)
 					}
 					goto simplify
 				}
@@ -227,10 +229,10 @@ func removeBoundsChecks(f *Func, m map[*Value]indVar) {
 				goto skip2
 			}
 
-			if iv, has := m[ind]; has && f.sdom.isAncestorEq(iv.entry, b) && isNonNegative(iv.min) {
+			if iv, has := m[ind]; has && sdom.isAncestorEq(iv.entry, b) && isNonNegative(iv.min) {
 				if v.Args[1].Op == OpSliceCap && iv.max.Op == OpSliceLen && v.Args[1].Args[0] == iv.max.Args[0] {
 					if f.pass.debug > 0 {
-						f.Config.Warnl(b.Line, "Found redundant %s (len promoted to cap)", v.Op)
+						f.Warnl(b.Pos, "Found redundant %s (len promoted to cap)", v.Op)
 					}
 					goto simplify
 				}
@@ -248,7 +250,7 @@ func removeBoundsChecks(f *Func, m map[*Value]indVar) {
 			}
 
 			// ind + add >= 0 <-> min + add >= 0 <-> min >= -add
-			if iv, has := m[ind]; has && f.sdom.isAncestorEq(iv.entry, b) && isGreaterOrEqualThan(iv.min, -add) {
+			if iv, has := m[ind]; has && sdom.isAncestorEq(iv.entry, b) && isGreaterOrEqualThan(iv.min, -add) {
 				if !v.Args[1].isGenericIntConst() || !iv.max.isGenericIntConst() {
 					goto skip3
 				}
@@ -261,7 +263,7 @@ func removeBoundsChecks(f *Func, m map[*Value]indVar) {
 
 				if max := iv.max.AuxInt + add; 0 <= max && max <= limit { // handle overflow
 					if f.pass.debug > 0 {
-						f.Config.Warnl(b.Line, "Found redundant (%s ind %d), ind < %d", v.Op, v.Args[1].AuxInt, iv.max.AuxInt+add)
+						f.Warnl(b.Pos, "Found redundant (%s ind %d), ind < %d", v.Op, v.Args[1].AuxInt, iv.max.AuxInt+add)
 					}
 					goto simplify
 				}

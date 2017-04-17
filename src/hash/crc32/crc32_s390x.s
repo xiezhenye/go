@@ -128,6 +128,10 @@ TEXT vectorizedBody<>(SB),NOSPLIT,$0
 	VZERO   V0
 	VLVGF   $3, R2, V0
 
+	// Crash if the input size is less than 64-bytes.
+	CMP     R4, $64
+	BLT     crash
+
 	// Load a 64-byte data chunk and XOR with CRC
 	VLM     0(R3), V1, V4    // 64-bytes into V1..V4
 
@@ -223,7 +227,7 @@ final_fold:
 	// Note: To compensate the division by x^32, use the vector unpack
 	// instruction to move the leftmost word into the leftmost doubleword
 	// of the vector register.  The rightmost doubleword is multiplied
-	// with zero to not contribute to the intermedate results.
+	// with zero to not contribute to the intermediate results.
 
 
 	// T1(x) = floor( R(x) / x^32 ) GF2MUL u
@@ -243,3 +247,6 @@ done:
 	XOR     $0xffffffff, R2 // NOTW R2
 	MOVWZ   R2, ret + 32(FP)
 	RET
+
+crash:
+	MOVD    $0, (R0) // input size is less than 64-bytes

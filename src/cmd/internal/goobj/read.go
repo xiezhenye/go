@@ -29,50 +29,48 @@ type SymKind int
 // TODO(rsc): Give idiomatic Go names.
 // TODO(rsc): Reduce the number of symbol types in the object files.
 const (
-	_ SymKind = iota
-
 	// readonly, executable
-	STEXT      SymKind = obj.STEXT
-	SELFRXSECT SymKind = obj.SELFRXSECT
+	STEXT      = SymKind(obj.STEXT)
+	SELFRXSECT = SymKind(obj.SELFRXSECT)
 
 	// readonly, non-executable
-	STYPE      SymKind = obj.STYPE
-	SSTRING    SymKind = obj.SSTRING
-	SGOSTRING  SymKind = obj.SGOSTRING
-	SGOFUNC    SymKind = obj.SGOFUNC
-	SRODATA    SymKind = obj.SRODATA
-	SFUNCTAB   SymKind = obj.SFUNCTAB
-	STYPELINK  SymKind = obj.STYPELINK
-	SITABLINK  SymKind = obj.SITABLINK
-	SSYMTAB    SymKind = obj.SSYMTAB // TODO: move to unmapped section
-	SPCLNTAB   SymKind = obj.SPCLNTAB
-	SELFROSECT SymKind = obj.SELFROSECT
+	STYPE      = SymKind(obj.STYPE)
+	SSTRING    = SymKind(obj.SSTRING)
+	SGOSTRING  = SymKind(obj.SGOSTRING)
+	SGOFUNC    = SymKind(obj.SGOFUNC)
+	SRODATA    = SymKind(obj.SRODATA)
+	SFUNCTAB   = SymKind(obj.SFUNCTAB)
+	STYPELINK  = SymKind(obj.STYPELINK)
+	SITABLINK  = SymKind(obj.SITABLINK)
+	SSYMTAB    = SymKind(obj.SSYMTAB) // TODO: move to unmapped section
+	SPCLNTAB   = SymKind(obj.SPCLNTAB)
+	SELFROSECT = SymKind(obj.SELFROSECT)
 
 	// writable, non-executable
-	SMACHOPLT  SymKind = obj.SMACHOPLT
-	SELFSECT   SymKind = obj.SELFSECT
-	SMACHO     SymKind = obj.SMACHO // Mach-O __nl_symbol_ptr
-	SMACHOGOT  SymKind = obj.SMACHOGOT
-	SWINDOWS   SymKind = obj.SWINDOWS
-	SELFGOT    SymKind = obj.SELFGOT
-	SNOPTRDATA SymKind = obj.SNOPTRDATA
-	SINITARR   SymKind = obj.SINITARR
-	SDATA      SymKind = obj.SDATA
-	SBSS       SymKind = obj.SBSS
-	SNOPTRBSS  SymKind = obj.SNOPTRBSS
-	STLSBSS    SymKind = obj.STLSBSS
+	SMACHOPLT  = SymKind(obj.SMACHOPLT)
+	SELFSECT   = SymKind(obj.SELFSECT)
+	SMACHO     = SymKind(obj.SMACHO) // Mach-O __nl_symbol_ptr
+	SMACHOGOT  = SymKind(obj.SMACHOGOT)
+	SWINDOWS   = SymKind(obj.SWINDOWS)
+	SELFGOT    = SymKind(obj.SELFGOT)
+	SNOPTRDATA = SymKind(obj.SNOPTRDATA)
+	SINITARR   = SymKind(obj.SINITARR)
+	SDATA      = SymKind(obj.SDATA)
+	SBSS       = SymKind(obj.SBSS)
+	SNOPTRBSS  = SymKind(obj.SNOPTRBSS)
+	STLSBSS    = SymKind(obj.STLSBSS)
 
 	// not mapped
-	SXREF             SymKind = obj.SXREF
-	SMACHOSYMSTR      SymKind = obj.SMACHOSYMSTR
-	SMACHOSYMTAB      SymKind = obj.SMACHOSYMTAB
-	SMACHOINDIRECTPLT SymKind = obj.SMACHOINDIRECTPLT
-	SMACHOINDIRECTGOT SymKind = obj.SMACHOINDIRECTGOT
-	SFILE             SymKind = obj.SFILE
-	SFILEPATH         SymKind = obj.SFILEPATH
-	SCONST            SymKind = obj.SCONST
-	SDYNIMPORT        SymKind = obj.SDYNIMPORT
-	SHOSTOBJ          SymKind = obj.SHOSTOBJ
+	SXREF             = SymKind(obj.SXREF)
+	SMACHOSYMSTR      = SymKind(obj.SMACHOSYMSTR)
+	SMACHOSYMTAB      = SymKind(obj.SMACHOSYMTAB)
+	SMACHOINDIRECTPLT = SymKind(obj.SMACHOINDIRECTPLT)
+	SMACHOINDIRECTGOT = SymKind(obj.SMACHOINDIRECTGOT)
+	SFILE             = SymKind(obj.SFILE)
+	SFILEPATH         = SymKind(obj.SFILEPATH)
+	SCONST            = SymKind(obj.SCONST)
+	SDYNIMPORT        = SymKind(obj.SDYNIMPORT)
+	SHOSTOBJ          = SymKind(obj.SHOSTOBJ)
 )
 
 var symKindStrings = []string{
@@ -163,7 +161,7 @@ type Data struct {
 // A Reloc describes a relocation applied to a memory image to refer
 // to an address within a particular symbol.
 type Reloc struct {
-	// The bytes at [Offset, Offset+Size) within the memory image
+	// The bytes at [Offset, Offset+Size) within the containing Sym
 	// should be updated to refer to the address Add bytes after the start
 	// of the symbol Sym.
 	Offset int
@@ -174,7 +172,7 @@ type Reloc struct {
 	// The Type records the form of address expected in the bytes
 	// described by the previous fields: absolute, PC-relative, and so on.
 	// TODO(rsc): The interpretation of Type is not exposed by this package.
-	Type int
+	Type obj.RelocType
 }
 
 // A Var describes a variable in a function stack frame: a declared
@@ -200,9 +198,11 @@ type Func struct {
 	PCSP     Data       // PC → SP offset map
 	PCFile   Data       // PC → file number map (index into File)
 	PCLine   Data       // PC → line number map
+	PCInline Data       // PC → inline tree index map
 	PCData   []Data     // PC → runtime support data map
 	FuncData []FuncData // non-PC-specific runtime support data
 	File     []string   // paths indexed by PCFile
+	InlTree  []InlinedCall
 }
 
 // TODO: Add PCData []byte and PCDataIter (similar to liblink).
@@ -213,6 +213,15 @@ type FuncData struct {
 	Offset int64 // offset into symbol for funcdata pointer
 }
 
+// An InlinedCall is a node in an InlTree.
+// See cmd/internal/obj.InlTree for details.
+type InlinedCall struct {
+	Parent int
+	File   string
+	Line   int
+	Func   SymID
+}
+
 // A Package is a parsed Go object file or archive defining a Go package.
 type Package struct {
 	ImportPath string   // import path denoting this package
@@ -220,6 +229,7 @@ type Package struct {
 	SymRefs    []SymID  // list of symbol names and versions referred to by this pack
 	Syms       []*Sym   // symbols defined by this package
 	MaxVersion int      // maximum Version in any SymID in Syms
+	Arch       string   // architecture
 }
 
 var (
@@ -243,7 +253,6 @@ type objReader struct {
 	dataOffset int64
 	limit      int64
 	tmp        [256]byte
-	pkg        string
 	pkgprefix  string
 }
 
@@ -561,14 +570,13 @@ func (r *objReader) parseArchive() error {
 // The format of that part is defined in a comment at the top
 // of src/liblink/objfile.c.
 func (r *objReader) parseObject(prefix []byte) error {
-	// TODO(rsc): Maybe use prefix and the initial input to
-	// record the header line from the file, which would
-	// give the architecture and other version information.
-
 	r.p.MaxVersion++
+	h := make([]byte, 0, 256)
+	h = append(h, prefix...)
 	var c1, c2, c3 byte
 	for {
 		c1, c2, c3 = c2, c3, r.readByte()
+		h = append(h, c3)
 		// The new export format can contain 0 bytes.
 		// Don't consider them errors, only look for r.err != nil.
 		if r.err != nil {
@@ -579,8 +587,14 @@ func (r *objReader) parseObject(prefix []byte) error {
 		}
 	}
 
+	hs := strings.Fields(string(h))
+	if len(hs) >= 4 {
+		r.p.Arch = hs[3]
+	}
+	// TODO: extract OS + build ID if/when we need it
+
 	r.readFull(r.tmp[:8])
-	if !bytes.Equal(r.tmp[:8], []byte("\x00\x00go17ld")) {
+	if !bytes.Equal(r.tmp[:8], []byte("\x00\x00go19ld")) {
 		return r.error(errCorruptObject)
 	}
 
@@ -643,7 +657,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 			rel := &s.Reloc[i]
 			rel.Offset = r.readInt()
 			rel.Size = r.readInt()
-			rel.Type = r.readInt()
+			rel.Type = obj.RelocType(r.readInt())
 			rel.Add = r.readInt()
 			rel.Sym = r.readSymID()
 		}
@@ -668,6 +682,7 @@ func (r *objReader) parseObject(prefix []byte) error {
 			f.PCSP = r.readData()
 			f.PCFile = r.readData()
 			f.PCLine = r.readData()
+			f.PCInline = r.readData()
 			f.PCData = make([]Data, r.readInt())
 			for i := range f.PCData {
 				f.PCData[i] = r.readData()
@@ -683,13 +698,35 @@ func (r *objReader) parseObject(prefix []byte) error {
 			for i := range f.File {
 				f.File[i] = r.readSymID().Name
 			}
+			f.InlTree = make([]InlinedCall, r.readInt())
+			for i := range f.InlTree {
+				f.InlTree[i].Parent = r.readInt()
+				f.InlTree[i].File = r.readSymID().Name
+				f.InlTree[i].Line = r.readInt()
+				f.InlTree[i].Func = r.readSymID()
+			}
 		}
 	}
 
 	r.readFull(r.tmp[:7])
-	if !bytes.Equal(r.tmp[:7], []byte("\xffgo17ld")) {
+	if !bytes.Equal(r.tmp[:7], []byte("\xffgo19ld")) {
 		return r.error(errCorruptObject)
 	}
 
 	return nil
+}
+
+func (r *Reloc) String(insnOffset uint64) string {
+	delta := r.Offset - int(insnOffset)
+	s := fmt.Sprintf("[%d:%d]%s", delta, delta+r.Size, r.Type)
+	if r.Sym.Name != "" {
+		if r.Add != 0 {
+			return fmt.Sprintf("%s:%s+%d", s, r.Sym.Name, r.Add)
+		}
+		return fmt.Sprintf("%s:%s", s, r.Sym.Name)
+	}
+	if r.Add != 0 {
+		return fmt.Sprintf("%s:%d", s, r.Add)
+	}
+	return s
 }

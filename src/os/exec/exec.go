@@ -55,7 +55,11 @@ type Cmd struct {
 	Args []string
 
 	// Env specifies the environment of the process.
-	// If Env is nil, Run uses the current process's environment.
+	// Each entry is of the form "key=value".
+	// If Env is nil, the new process uses the current process's
+	// environment.
+	// If Env contains duplicate environment keys, only the last
+	// value in the slice for each duplicate key is used.
 	Env []string
 
 	// Dir specifies the working directory of the command.
@@ -120,12 +124,13 @@ type Cmd struct {
 // It sets only the Path and Args in the returned structure.
 //
 // If name contains no path separators, Command uses LookPath to
-// resolve the path to a complete name if possible. Otherwise it uses
-// name directly.
+// resolve name to a complete path if possible. Otherwise it uses name
+// directly as Path.
 //
 // The returned Cmd's Args field is constructed from the command name
 // followed by the elements of arg, so arg should not include the
-// command name itself. For example, Command("echo", "hello")
+// command name itself. For example, Command("echo", "hello").
+// Args[0] is always name, not the possibly resolved Path.
 func Command(name string, arg ...string) *Cmd {
 	cmd := &Cmd{
 		Path: name,
@@ -269,9 +274,8 @@ func (c *Cmd) closeDescriptors(closers []io.Closer) {
 // copying stdin, stdout, and stderr, and exits with a zero exit
 // status.
 //
-// If the command fails to run or doesn't complete successfully, the
-// error is of type *ExitError. Other error types may be
-// returned for I/O problems.
+// If the command starts but does not complete successfully, the error is of
+// type *ExitError. Other error types may be returned for other situations.
 func (c *Cmd) Run() error {
 	if err := c.Start(); err != nil {
 		return err
@@ -353,7 +357,7 @@ func (c *Cmd) Start() error {
 	c.Process, err = os.StartProcess(c.Path, c.argv(), &os.ProcAttr{
 		Dir:   c.Dir,
 		Files: c.childFiles,
-		Env:   c.envv(),
+		Env:   dedupEnv(c.envv()),
 		Sys:   c.SysProcAttr,
 	})
 	if err != nil {
@@ -515,15 +519,16 @@ func (c *Cmd) StdinPipe() (io.WriteCloser, error) {
 	c.Stdin = pr
 	c.closeAfterStart = append(c.closeAfterStart, pr)
 	wc := &closeOnce{File: pw}
-	c.closeAfterWait = append(c.closeAfterWait, wc)
+	c.closeAfterWait = append(c.closeAfterWait, closerFunc(wc.safeClose))
 	return wc, nil
 }
 
 type closeOnce struct {
 	*os.File
 
-	once sync.Once
-	err  error
+	writers sync.RWMutex // coordinate safeClose and Write
+	once    sync.Once
+	err     error
 }
 
 func (c *closeOnce) Close() error {
@@ -533,6 +538,55 @@ func (c *closeOnce) Close() error {
 
 func (c *closeOnce) close() {
 	c.err = c.File.Close()
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
+
+// safeClose closes c being careful not to race with any calls to c.Write.
+// See golang.org/issue/9307 and TestEchoFileRace in exec_test.go.
+// In theory other calls could also be excluded (by writing appropriate
+// wrappers like c.Write's implementation below), but since c is most
+// commonly used as a WriteCloser, Write is the main one to worry about.
+// See also #7970, for which this is a partial fix for this specific instance.
+// The idea is that we return a WriteCloser, and so the caller can be
+// relied upon not to call Write and Close simultaneously, but it's less
+// obvious that cmd.Wait calls Close and that the caller must not call
+// Write and cmd.Wait simultaneously. In fact that seems too onerous.
+// So we change the use of Close in cmd.Wait to use safeClose, which will
+// synchronize with any Write.
+//
+// It's important that we know this won't block forever waiting for the
+// operations being excluded. At the point where this is called,
+// the invoked command has exited and the parent copy of the read side
+// of the pipe has also been closed, so there should really be no read side
+// of the pipe left. Any active writes should return very shortly with an EPIPE,
+// making it reasonable to wait for them.
+// Technically it is possible that the child forked a sub-process or otherwise
+// handed off the read side of the pipe before exiting and the current holder
+// is not reading from the pipe, and the pipe is full, in which case the close here
+// might block waiting for the write to complete. That's probably OK.
+// It's a small enough problem to be outweighed by eliminating the race here.
+func (c *closeOnce) safeClose() error {
+	c.writers.Lock()
+	err := c.Close()
+	c.writers.Unlock()
+	return err
+}
+
+func (c *closeOnce) Write(b []byte) (int, error) {
+	c.writers.RLock()
+	n, err := c.File.Write(b)
+	c.writers.RUnlock()
+	return n, err
+}
+
+func (c *closeOnce) WriteString(s string) (int, error) {
+	c.writers.RLock()
+	n, err := c.File.WriteString(s)
+	c.writers.RUnlock()
+	return n, err
 }
 
 // StdoutPipe returns a pipe that will be connected to the command's
@@ -660,4 +714,36 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// dedupEnv returns a copy of env with any duplicates removed, in favor of
+// later values.
+// Items not of the normal environment "key=value" form are preserved unchanged.
+func dedupEnv(env []string) []string {
+	return dedupEnvCase(runtime.GOOS == "windows", env)
+}
+
+// dedupEnvCase is dedupEnv with a case option for testing.
+// If caseInsensitive is true, the case of keys is ignored.
+func dedupEnvCase(caseInsensitive bool, env []string) []string {
+	out := make([]string, 0, len(env))
+	saw := map[string]int{} // key => index into out
+	for _, kv := range env {
+		eq := strings.Index(kv, "=")
+		if eq < 0 {
+			out = append(out, kv)
+			continue
+		}
+		k := kv[:eq]
+		if caseInsensitive {
+			k = strings.ToLower(k)
+		}
+		if dupIdx, isDup := saw[k]; isDup {
+			out[dupIdx] = kv
+			continue
+		}
+		saw[k] = len(out)
+		out = append(out, kv)
+	}
+	return out
 }

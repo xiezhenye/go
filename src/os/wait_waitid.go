@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// +build darwin linux
+// We used to used this code for Darwin, but according to issue #19314
+// waitid returns if the process is stopped, even when using WEXITED.
+
+// +build linux
 
 package os
 
@@ -26,7 +29,7 @@ func (p *Process) blockUntilWaitable() (bool, error) {
 	var siginfo [128]byte
 	psig := &siginfo[0]
 	_, _, e := syscall.Syscall6(syscall.SYS_WAITID, _P_PID, uintptr(p.Pid), uintptr(unsafe.Pointer(psig)), syscall.WEXITED|syscall.WNOWAIT, 0, 0)
-	runtime.KeepAlive(psig)
+	runtime.KeepAlive(p)
 	if e != 0 {
 		// waitid has been available since Linux 2.6.9, but
 		// reportedly is not available in Ubuntu on Windows.

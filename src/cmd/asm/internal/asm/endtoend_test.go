@@ -26,12 +26,12 @@ import (
 // result against a golden file.
 
 func testEndToEnd(t *testing.T, goarch, file string) {
-	lex.InitHist()
 	input := filepath.Join("testdata", file+".s")
 	architecture, ctxt := setArch(goarch)
-	lexer := lex.NewLexer(input, ctxt)
+	architecture.Init(ctxt)
+	lexer := lex.NewLexer(input)
 	parser := NewParser(ctxt, architecture, lexer)
-	pList := obj.Linknewplist(ctxt)
+	pList := new(obj.Plist)
 	var ok bool
 	testOut = new(bytes.Buffer) // The assembler writes test output to this buffer.
 	ctxt.Bso = bufio.NewWriter(os.Stdout)
@@ -61,6 +61,11 @@ func testEndToEnd(t *testing.T, goarch, file string) {
 Diff:
 	for _, line := range lines {
 		lineno++
+
+		// Ignore include of textflag.h.
+		if strings.HasPrefix(line, "#include ") {
+			continue
+		}
 
 		// The general form of a test input line is:
 		//	// comment
@@ -180,7 +185,7 @@ Diff:
 		t.Errorf(format, args...)
 		ok = false
 	}
-	obj.FlushplistNoFree(ctxt)
+	obj.Flushplist(ctxt, pList, nil)
 
 	for p := top; p != nil; p = p.Link {
 		if p.As == obj.ATEXT {
@@ -264,12 +269,11 @@ var (
 )
 
 func testErrors(t *testing.T, goarch, file string) {
-	lex.InitHist()
 	input := filepath.Join("testdata", file+".s")
 	architecture, ctxt := setArch(goarch)
-	lexer := lex.NewLexer(input, ctxt)
+	lexer := lex.NewLexer(input)
 	parser := NewParser(ctxt, architecture, lexer)
-	pList := obj.Linknewplist(ctxt)
+	pList := new(obj.Plist)
 	var ok bool
 	testOut = new(bytes.Buffer) // The assembler writes test output to this buffer.
 	ctxt.Bso = bufio.NewWriter(os.Stdout)
@@ -285,7 +289,7 @@ func testErrors(t *testing.T, goarch, file string) {
 		errBuf.WriteString(s)
 	}
 	pList.Firstpc, ok = parser.Parse()
-	obj.Flushplist(ctxt)
+	obj.Flushplist(ctxt, pList, nil)
 	if ok && !failed {
 		t.Errorf("asm: %s had no errors", goarch)
 	}
@@ -383,7 +387,8 @@ func TestAMD64Errors(t *testing.T) {
 	testErrors(t, "amd64", "amd64error")
 }
 
-func TestMIPS64EndToEnd(t *testing.T) {
+func TestMIPSEndToEnd(t *testing.T) {
+	testEndToEnd(t, "mips", "mips")
 	testEndToEnd(t, "mips64", "mips64")
 }
 

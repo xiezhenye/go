@@ -8,6 +8,7 @@ package os
 
 import (
 	"io"
+	"runtime"
 	"syscall"
 )
 
@@ -34,6 +35,11 @@ func (f *File) readdir(n int) (fi []FileInfo, err error) {
 		}
 		fi = append(fi, fip)
 	}
+	if len(fi) == 0 && err == nil && n > 0 {
+		// Per File.Readdir, the slice must be non-empty or err
+		// must be non-nil if n > 0.
+		err = io.EOF
+	}
 	return fi, err
 }
 
@@ -58,9 +64,10 @@ func (f *File) readdirnames(n int) (names []string, err error) {
 		if d.bufp >= d.nbuf {
 			d.bufp = 0
 			var errno error
-			d.nbuf, errno = fixCount(syscall.ReadDirent(f.fd, d.buf))
+			d.nbuf, errno = f.pfd.ReadDirent(d.buf)
+			runtime.KeepAlive(f)
 			if errno != nil {
-				return names, NewSyscallError("readdirent", errno)
+				return names, wrapSyscallError("readdirent", errno)
 			}
 			if d.nbuf <= 0 {
 				break // EOF

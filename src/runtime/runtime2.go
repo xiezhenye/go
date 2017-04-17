@@ -205,6 +205,14 @@ func (gp *guintptr) cas(old, new guintptr) bool {
 	return atomic.Casuintptr((*uintptr)(unsafe.Pointer(gp)), uintptr(old), uintptr(new))
 }
 
+// setGNoWB performs *gp = new without a write barrier.
+// For times when it's impractical to use a guintptr.
+//go:nosplit
+//go:nowritebarrier
+func setGNoWB(gp **g, new *g) {
+	(*guintptr)(unsafe.Pointer(gp)).set(new)
+}
+
 type puintptr uintptr
 
 //go:nosplit
@@ -221,8 +229,25 @@ func (mp muintptr) ptr() *m { return (*m)(unsafe.Pointer(mp)) }
 //go:nosplit
 func (mp *muintptr) set(m *m) { *mp = muintptr(unsafe.Pointer(m)) }
 
+// setMNoWB performs *mp = new without a write barrier.
+// For times when it's impractical to use an muintptr.
+//go:nosplit
+//go:nowritebarrier
+func setMNoWB(mp **m, new *m) {
+	(*muintptr)(unsafe.Pointer(mp)).set(new)
+}
+
 type gobuf struct {
 	// The offsets of sp, pc, and g are known to (hard-coded in) libmach.
+	//
+	// ctxt is unusual with respect to GC: it may be a
+	// heap-allocated funcval so write require a write barrier,
+	// but gobuf needs to be cleared from assembly. We take
+	// advantage of the fact that the only path that uses a
+	// non-nil ctxt is morestack. As a result, gogo is the only
+	// place where it may not already be nil, so gogo uses an
+	// explicit write barrier. Everywhere else that resets the
+	// gobuf asserts that ctxt is already nil.
 	sp   uintptr
 	pc   uintptr
 	g    guintptr
@@ -245,7 +270,7 @@ type gobuf struct {
 type sudog struct {
 	// The following fields are protected by the hchan.lock of the
 	// channel this sudog is blocking on. shrinkstack depends on
-	// this.
+	// this for sudogs involved in channel ops.
 
 	g          *g
 	selectdone *uint32 // CAS to 1 to win select race (may point to stack)
@@ -254,22 +279,17 @@ type sudog struct {
 	elem       unsafe.Pointer // data element (may point to stack)
 
 	// The following fields are never accessed concurrently.
-	// waitlink is only accessed by g.
+	// For channels, waitlink is only accessed by g.
+	// For semaphores, all fields (including the ones above)
+	// are only accessed when holding a semaRoot lock.
 
+	acquiretime int64
 	releasetime int64
 	ticket      uint32
-	waitlink    *sudog // g.waiting list
+	parent      *sudog // semaRoot binary tree
+	waitlink    *sudog // g.waiting list or semaRoot
+	waittail    *sudog // semaRoot
 	c           *hchan // channel
-}
-
-type gcstats struct {
-	// the struct must consist of only uint64's,
-	// because it is casted to uint64[].
-	nhandoff    uint64
-	nhandoffcnt uint64
-	nprocyield  uint64
-	nosyield    uint64
-	nsleep      uint64
 }
 
 type libcall struct {
@@ -297,12 +317,6 @@ type stack struct {
 	hi uintptr
 }
 
-// stkbar records the state of a G's stack barrier.
-type stkbar struct {
-	savedLRPtr uintptr // location overwritten by stack barrier PC
-	savedLRVal uintptr // value overwritten at savedLRPtr
-}
-
 type g struct {
 	// Stack parameters.
 	// stack describes the actual stack memory: [stack.lo, stack.hi).
@@ -318,12 +332,9 @@ type g struct {
 	_panic         *_panic // innermost panic - offset known to liblink
 	_defer         *_defer // innermost defer
 	m              *m      // current m; offset known to arm liblink
-	stackAlloc     uintptr // stack allocation is [stack.lo,stack.lo+stackAlloc)
 	sched          gobuf
 	syscallsp      uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc
 	syscallpc      uintptr        // if status==Gsyscall, syscallpc = sched.pc to use during gc
-	stkbar         []stkbar       // stack barriers, from low to high (see top of mstkbar.go)
-	stkbarPos      uintptr        // index of lowest stack barrier not hit
 	stktopsp       uintptr        // expected sp at top of stack, to check in traceback
 	param          unsafe.Pointer // passed parameter on wakeup
 	atomicstatus   uint32
@@ -336,7 +347,7 @@ type g struct {
 	paniconfault   bool     // panic (instead of crash) on unexpected fault address
 	preemptscan    bool     // preempted g does scan for gc
 	gcscandone     bool     // g has scanned stack; protected by _Gscan bit in status
-	gcscanvalid    bool     // false at start of gc cycle, true if G has not run since last scan; transition from true to false by calling queueRescan and false to true by calling dequeueRescan
+	gcscanvalid    bool     // false at start of gc cycle, true if G has not run since last scan; TODO: remove?
 	throwsplit     bool     // must not split stack
 	raceignore     int8     // ignore race detection events
 	sysblocktraced bool     // StartTrace has emitted EvGoInSyscall about this goroutine
@@ -352,17 +363,12 @@ type g struct {
 	gopc           uintptr // pc of go statement that created this goroutine
 	startpc        uintptr // pc of goroutine function
 	racectx        uintptr
-	waiting        *sudog    // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
-	cgoCtxt        []uintptr // cgo traceback context
+	waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
+	cgoCtxt        []uintptr      // cgo traceback context
+	labels         unsafe.Pointer // profiler labels
+	timer          *timer         // cached timer for time.Sleep
 
 	// Per-G GC state
-
-	// gcRescan is this G's index in work.rescan.list. If this is
-	// -1, this G is not on the rescan list.
-	//
-	// If gcphase != _GCoff and this G is visible to the garbage
-	// collector, writes to this are protected by work.rescan.lock.
-	gcRescan int32
 
 	// gcAssistBytes is this G's GC assist credit in terms of
 	// bytes allocated. If this is positive, then the G has credit
@@ -403,6 +409,7 @@ type m struct {
 	inwb          bool // m is executing a write barrier
 	newSigstack   bool // minit on C thread called sigaltstack
 	printlock     int8
+	incgo         bool // m is executing a cgo call
 	fastrand      uint32
 	ncgocall      uint64      // number of cgo calls in total
 	ncgo          int32       // number of cgo calls currently in progress
@@ -419,7 +426,6 @@ type m struct {
 	fflag         uint32      // floating point compare flags
 	locked        uint32      // tracking for lockosthread
 	nextwaitm     uintptr     // next m waiting for lock
-	gcstats       gcstats
 	needextram    bool
 	traceback     uint8
 	waitunlockf   unsafe.Pointer // todo go func(*g, unsafe.pointer) bool
@@ -498,7 +504,7 @@ type p struct {
 
 	runSafePointFn uint32 // if 1, run sched.safePointFn at next safe point
 
-	pad [64]byte
+	pad [sys.CacheLineSize]byte
 }
 
 const (
@@ -575,18 +581,12 @@ const (
 	_LockInternal = 2
 )
 
-type sigtabtt struct {
-	flags int32
-	name  *int8
-}
-
 const (
 	_SigNotify   = 1 << iota // let signal.Notify have signal, even if from kernel
 	_SigKill                 // if signal.Notify doesn't take it, exit quietly
 	_SigThrow                // if signal.Notify doesn't take it, exit loudly
 	_SigPanic                // if the signal is from the kernel, panic
 	_SigDefault              // if the signal isn't explicitly requested, don't monitor it
-	_SigHandling             // our signal handler is registered
 	_SigGoExit               // cause all runtime procs to exit (only used on Plan 9).
 	_SigSetStack             // add SA_ONSTACK to libc handler
 	_SigUnblock              // unblocked in minit
@@ -594,7 +594,7 @@ const (
 
 // Layout of in-memory per-function information prepared by linker
 // See https://golang.org/s/go12symtab.
-// Keep in sync with linker
+// Keep in sync with linker (../cmd/link/internal/ld/pcln.go:/pclntab)
 // and with package debug/gosym and with symtab.go in package runtime.
 type _func struct {
 	entry   uintptr // start pc
@@ -618,8 +618,10 @@ type itab struct {
 	inter  *interfacetype
 	_type  *_type
 	link   *itab
-	bad    int32
-	unused int32
+	hash   uint32 // copy of _type.hash. Used for type switches.
+	bad    bool   // type does not implement interface
+	inhash bool   // has this itab been added to hash?
+	unused [2]byte
 	fun    [1]uintptr // variable sized
 }
 
@@ -683,7 +685,7 @@ type _panic struct {
 
 // stack traces
 type stkframe struct {
-	fn       *_func     // function being run
+	fn       funcInfo   // function being run
 	pc       uintptr    // program counter within fn
 	continpc uintptr    // program counter where execution can continue, or 0 if not
 	lr       uintptr    // program counter at caller aka link register
@@ -724,6 +726,9 @@ var (
 	lfenceBeforeRdtsc bool
 	support_avx       bool
 	support_avx2      bool
+	support_bmi1      bool
+	support_bmi2      bool
+	support_popcnt    bool
 
 	goarm                uint8 // set by cmd/link on arm systems
 	framepointer_enabled bool  // set by cmd/link

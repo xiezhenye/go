@@ -1,6 +1,6 @@
 // Derived from Inferno utils/6l/obj.c and utils/6l/span.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/obj.c
-// http://code.google.com/p/inferno-os/source/browse/utils/6l/span.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/obj.c
+// https://bitbucket.org/inferno-os/inferno-os/src/default/utils/6l/span.c
 //
 //	Copyright © 1994-1999 Lucent Technologies Inc.  All rights reserved.
 //	Portions Copyright © 1995-1997 C H Forsyth (forsyth@terzarima.net)
@@ -70,7 +70,7 @@ func (s *LSym) GrowCap(c int64) {
 // prepwrite prepares to write data of size siz into s at offset off.
 func (s *LSym) prepwrite(ctxt *Link, off int64, siz int) {
 	if off < 0 || siz < 0 || off >= 1<<30 {
-		log.Fatalf("prepwrite: bad off=%d siz=%d", off, siz)
+		ctxt.Diag("prepwrite: bad off=%d siz=%d s=%v", off, siz, s)
 	}
 	if s.Type == SBSS || s.Type == STLSBSS {
 		ctxt.Diag("cannot supply data for BSS var")
@@ -145,6 +145,22 @@ func (s *LSym) WriteOff(ctxt *Link, off int64, rsym *LSym, roff int64) {
 	r.Add = roff
 }
 
+// WriteWeakOff writes a weak 4 byte offset to rsym+roff into s at offset off.
+// After linking the 4 bytes stored at s+off will be
+// rsym+roff-(start of section that s is in).
+func (s *LSym) WriteWeakOff(ctxt *Link, off int64, rsym *LSym, roff int64) {
+	s.prepwrite(ctxt, off, 4)
+	r := Addrel(s)
+	r.Off = int32(off)
+	if int64(r.Off) != off {
+		ctxt.Diag("WriteOff: off overflow %d in %s", off, s.Name)
+	}
+	r.Siz = 4
+	r.Sym = rsym
+	r.Type = R_WEAKADDROFF
+	r.Add = roff
+}
+
 // WriteString writes a string of size siz into s at offset off.
 func (s *LSym) WriteString(ctxt *Link, off int64, siz int, str string) {
 	if siz < len(str) {
@@ -164,27 +180,4 @@ func (s *LSym) WriteBytes(ctxt *Link, off int64, b []byte) int64 {
 func Addrel(s *LSym) *Reloc {
 	s.R = append(s.R, Reloc{})
 	return &s.R[len(s.R)-1]
-}
-
-func Setuintxx(ctxt *Link, s *LSym, off int64, v uint64, wid int64) int64 {
-	if s.Type == 0 {
-		s.Type = SDATA
-	}
-	if s.Size < off+wid {
-		s.Size = off + wid
-		s.Grow(s.Size)
-	}
-
-	switch wid {
-	case 1:
-		s.P[off] = uint8(v)
-	case 2:
-		ctxt.Arch.ByteOrder.PutUint16(s.P[off:], uint16(v))
-	case 4:
-		ctxt.Arch.ByteOrder.PutUint32(s.P[off:], uint32(v))
-	case 8:
-		ctxt.Arch.ByteOrder.PutUint64(s.P[off:], v)
-	}
-
-	return off + wid
 }

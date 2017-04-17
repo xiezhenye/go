@@ -7,6 +7,7 @@ package net
 import (
 	"context"
 	"fmt"
+	"internal/poll"
 	"io"
 	"io/ioutil"
 	"net/internal/socktest"
@@ -87,7 +88,7 @@ second:
 		return nil
 	}
 	switch err := nestedErr.(type) {
-	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
+	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *poll.TimeoutError, UnknownNetworkError:
 		return nil
 	case *os.SyscallError:
 		nestedErr = err.Err
@@ -97,7 +98,8 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errCanceled, errClosing, errMissingAddress, errNoSuitableAddress:
+	case errCanceled, poll.ErrClosing, errMissingAddress, errNoSuitableAddress,
+		context.DeadlineExceeded, context.Canceled:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -212,7 +214,7 @@ func TestDialAddrError(t *testing.T) {
 	case "nacl", "plan9":
 		t.Skipf("not supported on %s", runtime.GOOS)
 	}
-	if !supportsIPv4 || !supportsIPv6 {
+	if !supportsIPv4() || !supportsIPv6() {
 		t.Skip("both IPv4 and IPv6 are required")
 	}
 
@@ -230,23 +232,27 @@ func TestDialAddrError(t *testing.T) {
 	} {
 		var err error
 		var c Conn
+		var op string
 		if tt.lit != "" {
 			c, err = Dial(tt.network, JoinHostPort(tt.lit, "0"))
+			op = fmt.Sprintf("Dial(%q, %q)", tt.network, JoinHostPort(tt.lit, "0"))
 		} else {
 			c, err = DialTCP(tt.network, nil, tt.addr)
+			op = fmt.Sprintf("DialTCP(%q, %q)", tt.network, tt.addr)
 		}
 		if err == nil {
 			c.Close()
-			t.Errorf("%s %q/%v: should fail", tt.network, tt.lit, tt.addr)
+			t.Errorf("%s succeeded, want error", op)
 			continue
 		}
 		if perr := parseDialError(err); perr != nil {
-			t.Error(perr)
+			t.Errorf("%s: %v", op, perr)
 			continue
 		}
-		aerr, ok := err.(*OpError).Err.(*AddrError)
+		operr := err.(*OpError).Err
+		aerr, ok := operr.(*AddrError)
 		if !ok {
-			t.Errorf("%s %q/%v: should be AddrError: %v", tt.network, tt.lit, tt.addr, err)
+			t.Errorf("%s: %v is %T, want *AddrError", op, err, operr)
 			continue
 		}
 		want := tt.lit
@@ -254,7 +260,7 @@ func TestDialAddrError(t *testing.T) {
 			want = tt.addr.IP.String()
 		}
 		if aerr.Addr != want {
-			t.Fatalf("%s: got %q; want %q", tt.network, aerr.Addr, want)
+			t.Errorf("%s: %v, error Addr=%q, want %q", op, err, aerr.Addr, want)
 		}
 	}
 }
@@ -427,7 +433,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout:
+	case poll.ErrClosing, poll.ErrTimeout:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -462,14 +468,14 @@ second:
 		return nil
 	}
 	switch err := nestedErr.(type) {
-	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *timeoutError, UnknownNetworkError:
+	case *AddrError, addrinfoErrno, *DNSError, InvalidAddrError, *ParseError, *poll.TimeoutError, UnknownNetworkError:
 		return nil
 	case *os.SyscallError:
 		nestedErr = err.Err
 		goto third
 	}
 	switch nestedErr {
-	case errCanceled, errClosing, errMissingAddress, errTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
+	case errCanceled, poll.ErrClosing, errMissingAddress, poll.ErrTimeout, ErrWriteToConnected, io.ErrUnexpectedEOF:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -512,13 +518,17 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing:
+	case poll.ErrClosing:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
 
 third:
 	if isPlatformError(nestedErr) {
+		return nil
+	}
+	switch nestedErr {
+	case os.ErrClosed: // for Plan 9
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 3rd nested level: %T", nestedErr)
@@ -604,7 +614,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing, errTimeout:
+	case poll.ErrClosing, poll.ErrTimeout:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)
@@ -683,7 +693,7 @@ second:
 		goto third
 	}
 	switch nestedErr {
-	case errClosing:
+	case poll.ErrClosing:
 		return nil
 	}
 	return fmt.Errorf("unexpected type on 2nd nested level: %T", nestedErr)

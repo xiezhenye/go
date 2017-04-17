@@ -20,18 +20,18 @@ func TestVendorImports(t *testing.T) {
 	tg := testgo(t)
 	defer tg.cleanup()
 	tg.setenv("GOPATH", filepath.Join(tg.pwd(), "testdata"))
-	tg.run("list", "-f", "{{.ImportPath}} {{.Imports}}", "vend/...")
+	tg.run("list", "-f", "{{.ImportPath}} {{.Imports}}", "vend/...", "vend/vendor/...", "vend/x/vendor/...")
 	want := `
 		vend [vend/vendor/p r]
 		vend/dir1 []
 		vend/hello [fmt vend/vendor/strings]
 		vend/subdir [vend/vendor/p r]
+		vend/x [vend/x/vendor/p vend/vendor/q vend/x/vendor/r vend/dir1 vend/vendor/vend/dir1/dir2]
+		vend/x/invalid [vend/x/invalid/vendor/foo]
 		vend/vendor/p []
 		vend/vendor/q []
 		vend/vendor/strings []
 		vend/vendor/vend/dir1/dir2 []
-		vend/x [vend/x/vendor/p vend/vendor/q vend/x/vendor/r vend/dir1 vend/vendor/vend/dir1/dir2]
-		vend/x/invalid [vend/x/invalid/vendor/foo]
 		vend/x/vendor/p []
 		vend/x/vendor/p/p [notfound]
 		vend/x/vendor/r []
@@ -186,6 +186,42 @@ func TestVendorGetUpdate(t *testing.T) {
 	tg.setenv("GOPATH", tg.path("."))
 	tg.run("get", "github.com/rsc/go-get-issue-11864")
 	tg.run("get", "-u", "github.com/rsc/go-get-issue-11864")
+}
+
+func TestVendorGetU(t *testing.T) {
+	testenv.MustHaveExternalNetwork(t)
+
+	tg := testgo(t)
+	defer tg.cleanup()
+	tg.makeTempdir()
+	tg.setenv("GOPATH", tg.path("."))
+	tg.run("get", "-u", "github.com/rsc/go-get-issue-11864")
+}
+
+func TestVendorGetTU(t *testing.T) {
+	testenv.MustHaveExternalNetwork(t)
+
+	tg := testgo(t)
+	defer tg.cleanup()
+	tg.makeTempdir()
+	tg.setenv("GOPATH", tg.path("."))
+	tg.run("get", "-t", "-u", "github.com/rsc/go-get-issue-11864/...")
+}
+
+func TestVendorGetBadVendor(t *testing.T) {
+	testenv.MustHaveExternalNetwork(t)
+
+	for _, suffix := range []string{"bad/imp", "bad/imp2", "bad/imp3", "..."} {
+		t.Run(suffix, func(t *testing.T) {
+			tg := testgo(t)
+			defer tg.cleanup()
+			tg.makeTempdir()
+			tg.setenv("GOPATH", tg.path("."))
+			tg.runFail("get", "-t", "-u", "github.com/rsc/go-get-issue-18219/"+suffix)
+			tg.grepStderr("must be imported as", "did not find error about vendor import")
+			tg.mustNotExist(tg.path("src/github.com/rsc/vendor"))
+		})
+	}
 }
 
 func TestGetSubmodules(t *testing.T) {

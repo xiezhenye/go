@@ -94,11 +94,19 @@ func checkMediaTypeDisposition(s string) error {
 	return nil
 }
 
+// ErrInvalidMediaParameter is returned by ParseMediaType if
+// the media type value was found but there was an error parsing
+// the optional parameters
+var ErrInvalidMediaParameter = errors.New("mime: invalid media parameter")
+
 // ParseMediaType parses a media type value and any optional
 // parameters, per RFC 1521.  Media types are the values in
 // Content-Type and Content-Disposition headers (RFC 2183).
 // On success, ParseMediaType returns the media type converted
 // to lowercase and trimmed of white space and a non-nil map.
+// If there is an error parsing the optional parameter,
+// the media type will be returned along with the error
+// ErrInvalidMediaParameter.
 // The returned map, params, maps from the lowercase
 // attribute to the attribute value with its case preserved.
 func ParseMediaType(v string) (mediatype string, params map[string]string, err error) {
@@ -134,7 +142,7 @@ func ParseMediaType(v string) (mediatype string, params map[string]string, err e
 				return
 			}
 			// Parse error.
-			return "", nil, errors.New("mime: invalid media parameter")
+			return mediatype, nil, ErrInvalidMediaParameter
 		}
 
 		pmap := params
@@ -248,24 +256,33 @@ func consumeValue(v string) (value, rest string) {
 	}
 
 	// parse a quoted-string
-	rest = v[1:] // consume the leading quote
 	buffer := new(bytes.Buffer)
-	var nextIsLiteral bool
-	for idx, r := range rest {
-		switch {
-		case nextIsLiteral:
-			buffer.WriteRune(r)
-			nextIsLiteral = false
-		case r == '"':
-			return buffer.String(), rest[idx+1:]
-		case r == '\\':
-			nextIsLiteral = true
-		case r != '\r' && r != '\n':
-			buffer.WriteRune(r)
-		default:
+	for i := 1; i < len(v); i++ {
+		r := v[i]
+		if r == '"' {
+			return buffer.String(), v[i+1:]
+		}
+		// When MSIE sends a full file path (in "intranet mode"), it does not
+		// escape backslashes: "C:\dev\go\foo.txt", not "C:\\dev\\go\\foo.txt".
+		//
+		// No known MIME generators emit unnecessary backslash escapes
+		// for simple token characters like numbers and letters.
+		//
+		// If we see an unnecessary backslash escape, assume it is from MSIE
+		// and intended as a literal backslash. This makes Go servers deal better
+		// with MSIE without affecting the way they handle conforming MIME
+		// generators.
+		if r == '\\' && i+1 < len(v) && !isTokenChar(rune(v[i+1])) {
+			buffer.WriteByte(v[i+1])
+			i++
+			continue
+		}
+		if r == '\r' || r == '\n' {
 			return "", v
 		}
+		buffer.WriteByte(v[i])
 	}
+	// Did not find end quote.
 	return "", v
 }
 

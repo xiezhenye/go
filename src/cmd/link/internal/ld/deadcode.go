@@ -15,7 +15,7 @@ import (
 // deadcode marks all reachable symbols.
 //
 // The basis of the dead code elimination is a flood fill of symbols,
-// following their relocations, beginning at INITENTRY.
+// following their relocations, beginning at *flagEntrySymbol.
 //
 // This flood fill is wrapped in logic for pruning unused methods.
 // All methods are mentioned by relocations on their receiver's *rtype.
@@ -45,8 +45,8 @@ import (
 //
 // Any unreached text symbols are removed from ctxt.Textp.
 func deadcode(ctxt *Link) {
-	if Debug['v'] != 0 {
-		fmt.Fprintf(ctxt.Bso, "%5.2f deadcode\n", obj.Cputime())
+	if ctxt.Debugvlog != 0 {
+		ctxt.Logf("%5.2f deadcode\n", obj.Cputime())
 	}
 
 	d := &deadcodepass{
@@ -55,15 +55,15 @@ func deadcode(ctxt *Link) {
 	}
 
 	// First, flood fill any symbols directly reachable in the call
-	// graph from INITENTRY. Ignore all methods not directly called.
+	// graph from *flagEntrySymbol. Ignore all methods not directly called.
 	d.init()
 	d.flood()
 
-	callSym := Linkrlookup(ctxt, "reflect.Value.Call", 0)
-	methSym := Linkrlookup(ctxt, "reflect.Value.Method", 0)
+	callSym := ctxt.Syms.ROLookup("reflect.Value.Call", 0)
+	methSym := ctxt.Syms.ROLookup("reflect.Value.Method", 0)
 	reflectSeen := false
 
-	if DynlinkingGo() {
+	if ctxt.DynlinkingGo() {
 		// Exported methods may satisfy interfaces we don't know
 		// about yet when dynamically linking.
 		reflectSeen = true
@@ -108,18 +108,17 @@ func deadcode(ctxt *Link) {
 	}
 
 	if Buildmode != BuildmodeShared {
-		// Keep a typelink or itablink if the symbol it points at is being kept.
-		// (When BuildmodeShared, always keep typelinks and itablinks.)
-		for _, s := range ctxt.Allsym {
-			if strings.HasPrefix(s.Name, "go.typelink.") ||
-				strings.HasPrefix(s.Name, "go.itablink.") {
+		// Keep a itablink if the symbol it points at is being kept.
+		// (When BuildmodeShared, always keep itablinks.)
+		for _, s := range ctxt.Syms.Allsym {
+			if strings.HasPrefix(s.Name, "go.itablink.") {
 				s.Attr.Set(AttrReachable, len(s.R) == 1 && s.R[0].Sym.Attr.Reachable())
 			}
 		}
 	}
 
 	// Remove dead text but keep file information (z symbols).
-	textp := make([]*LSym, 0, len(ctxt.Textp))
+	textp := make([]*Symbol, 0, len(ctxt.Textp))
 	for _, s := range ctxt.Textp {
 		if s.Attr.Reachable() {
 			textp = append(textp, s)
@@ -128,37 +127,16 @@ func deadcode(ctxt *Link) {
 	ctxt.Textp = textp
 }
 
-var markextra = []string{
-	"runtime.morestack",
-	"runtime.morestackx",
-	"runtime.morestack00",
-	"runtime.morestack10",
-	"runtime.morestack01",
-	"runtime.morestack11",
-	"runtime.morestack8",
-	"runtime.morestack16",
-	"runtime.morestack24",
-	"runtime.morestack32",
-	"runtime.morestack40",
-	"runtime.morestack48",
-
-	// on arm, lock in the div/mod helpers too
-	"_div",
-	"_divu",
-	"_mod",
-	"_modu",
-}
-
 // methodref holds the relocations from a receiver type symbol to its
 // method. There are three relocations, one for each of the fields in
 // the reflect.method struct: mtyp, ifn, and tfn.
 type methodref struct {
 	m   methodsig
-	src *LSym     // receiver type symbol
+	src *Symbol   // receiver type symbol
 	r   [3]*Reloc // R_METHODOFF relocations to fields of runtime.method
 }
 
-func (m methodref) ifn() *LSym { return m.r[1].Sym }
+func (m methodref) ifn() *Symbol { return m.r[1].Sym }
 
 func (m methodref) isExported() bool {
 	for _, r := range m.m {
@@ -170,7 +148,7 @@ func (m methodref) isExported() bool {
 // deadcodepass holds state for the deadcode flood fill.
 type deadcodepass struct {
 	ctxt            *Link
-	markQueue       []*LSym            // symbols to flood fill in next pass
+	markQueue       []*Symbol          // symbols to flood fill in next pass
 	ifaceMethod     map[methodsig]bool // methods declared in reached interfaces
 	markableMethods []methodref        // methods of reached types
 	reflectMethod   bool
@@ -180,8 +158,8 @@ func (d *deadcodepass) cleanupReloc(r *Reloc) {
 	if r.Sym.Attr.Reachable() {
 		r.Type = obj.R_ADDROFF
 	} else {
-		if Debug['v'] > 1 {
-			fmt.Fprintf(d.ctxt.Bso, "removing method %s\n", r.Sym.Name)
+		if d.ctxt.Debugvlog > 1 {
+			d.ctxt.Logf("removing method %s\n", r.Sym.Name)
 		}
 		r.Sym = nil
 		r.Siz = 0
@@ -189,14 +167,14 @@ func (d *deadcodepass) cleanupReloc(r *Reloc) {
 }
 
 // mark appends a symbol to the mark queue for flood filling.
-func (d *deadcodepass) mark(s, parent *LSym) {
+func (d *deadcodepass) mark(s, parent *Symbol) {
 	if s == nil || s.Attr.Reachable() {
 		return
 	}
 	if s.Attr.ReflectMethod() {
 		d.reflectMethod = true
 	}
-	if flag_dumpdep {
+	if *flagDumpDep {
 		p := "_"
 		if parent != nil {
 			p = parent.Name
@@ -217,22 +195,19 @@ func (d *deadcodepass) markMethod(m methodref) {
 }
 
 // init marks all initial symbols as reachable.
-// In a typical binary, this is INITENTRY.
+// In a typical binary, this is *flagEntrySymbol.
 func (d *deadcodepass) init() {
 	var names []string
 
 	if SysArch.Family == sys.ARM {
 		// mark some functions that are only referenced after linker code editing
-		if d.ctxt.Goarm == 5 {
-			names = append(names, "_sfloat")
-		}
 		names = append(names, "runtime.read_tls_fallback")
 	}
 
 	if Buildmode == BuildmodeShared {
 		// Mark all symbols defined in this library as reachable when
 		// building a shared library.
-		for _, s := range d.ctxt.Allsym {
+		for _, s := range d.ctxt.Syms.Allsym {
 			if s.Type != 0 && s.Type != obj.SDYNIMPORT {
 				d.mark(s, nil)
 			}
@@ -240,12 +215,20 @@ func (d *deadcodepass) init() {
 	} else {
 		// In a normal binary, start at main.main and the init
 		// functions and mark what is reachable from there.
-		names = append(names, INITENTRY)
-		if Linkshared && Buildmode == BuildmodeExe {
+		names = append(names, *flagEntrySymbol)
+		if *FlagLinkshared && (Buildmode == BuildmodeExe || Buildmode == BuildmodePIE) {
 			names = append(names, "main.main", "main.init")
-		}
-		for _, name := range markextra {
-			names = append(names, name)
+		} else if Buildmode == BuildmodePlugin {
+			names = append(names, *flagPluginPath+".init", *flagPluginPath+".main", "go.plugin.tabs")
+
+			// We don't keep the go.plugin.exports symbol,
+			// but we do keep the symbols it refers to.
+			exports := d.ctxt.Syms.ROLookup("go.plugin.exports", 0)
+			if exports != nil {
+				for _, r := range exports.R {
+					d.mark(r.Sym, nil)
+				}
+			}
 		}
 		for _, s := range dynexp {
 			d.mark(s, nil)
@@ -253,7 +236,7 @@ func (d *deadcodepass) init() {
 	}
 
 	for _, name := range names {
-		d.mark(Linkrlookup(d.ctxt, name, 0), nil)
+		d.mark(d.ctxt.Syms.ROLookup(name, 0), nil)
 	}
 }
 
@@ -264,8 +247,8 @@ func (d *deadcodepass) flood() {
 		s := d.markQueue[0]
 		d.markQueue = d.markQueue[1:]
 		if s.Type == obj.STEXT {
-			if Debug['v'] > 1 {
-				fmt.Fprintf(d.ctxt.Bso, "marktext %s\n", s.Name)
+			if d.ctxt.Debugvlog > 1 {
+				d.ctxt.Logf("marktext %s\n", s.Name)
 			}
 			if s.FuncInfo != nil {
 				for _, a := range s.FuncInfo.Autom {
@@ -276,10 +259,15 @@ func (d *deadcodepass) flood() {
 		}
 
 		if strings.HasPrefix(s.Name, "type.") && s.Name[5] != '.' {
-			if decodetype_kind(s)&kindMask == kindInterface {
-				for _, sig := range decodetype_ifacemethods(s) {
-					if Debug['v'] > 1 {
-						fmt.Fprintf(d.ctxt.Bso, "reached iface method: %s\n", sig)
+			if len(s.P) == 0 {
+				// Probably a bug. The undefined symbol check
+				// later will give a better error than deadcode.
+				continue
+			}
+			if decodetypeKind(s)&kindMask == kindInterface {
+				for _, sig := range decodeIfaceMethods(d.ctxt.Arch, s) {
+					if d.ctxt.Debugvlog > 1 {
+						d.ctxt.Logf("reached iface method: %s\n", sig)
 					}
 					d.ifaceMethod[sig] = true
 				}
@@ -291,6 +279,12 @@ func (d *deadcodepass) flood() {
 		for i := 0; i < len(s.R); i++ {
 			r := &s.R[i]
 			if r.Sym == nil {
+				continue
+			}
+			if r.Type == obj.R_WEAKADDROFF {
+				// An R_WEAKADDROFF relocation is not reason
+				// enough to mark the pointed-to symbol as
+				// reachable.
 				continue
 			}
 			if r.Type != obj.R_METHODOFF {
@@ -315,7 +309,7 @@ func (d *deadcodepass) flood() {
 			// Decode runtime type information for type methods
 			// to help work out which methods can be called
 			// dynamically via interfaces.
-			methodsigs := decodetype_methods(s)
+			methodsigs := decodetypeMethods(d.ctxt.Arch, s)
 			if len(methods) != len(methodsigs) {
 				panic(fmt.Sprintf("%q has %d method relocations for %d methods", s.Name, len(methods), len(methodsigs)))
 			}

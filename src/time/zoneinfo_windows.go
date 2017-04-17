@@ -11,8 +11,6 @@ import (
 	"syscall"
 )
 
-//go:generate go run genzabbrs.go -output zoneinfo_abbrs_windows.go
-
 // TODO(rsc): Fall back to copy of zoneinfo files.
 
 // BUG(brainman,rsc): On Windows, the operating system does not provide complete
@@ -134,7 +132,7 @@ func pseudoUnix(year int, d *syscall.Systemtime) int64 {
 			day -= 7
 		}
 	}
-	return t.sec + int64(day-1)*secondsPerDay + internalToUnix
+	return t.sec() + int64(day-1)*secondsPerDay + internalToUnix
 }
 
 func initLocalFromTZI(i *syscall.Timezoneinformation) {

@@ -106,7 +106,7 @@ TEXT runtime·raiseproc(SB),NOSPLIT,$24
 	MOVW	$SYS_getpid, R12
 	SWI	$0x80
 	// arg 1 pid already in R0 from getpid
-	MOVW	unnamed+0(FP), R1	// arg 2 - signal
+	MOVW	sig+0(FP), R1	// arg 2 - signal
 	MOVW	$1, R2	// arg 3 - posix
 	MOVW	$SYS_kill, R12
 	SWI $0x80
@@ -159,7 +159,7 @@ TEXT runtime·mincore(SB),NOSPLIT,$0
 	MOVW	R0, ret+12(FP)
 	RET
 
-TEXT time·now(SB), 7, $32
+TEXT runtime·walltime(SB), 7, $32
 	MOVW	$8(R13), R0  // timeval
 	MOVW	$0, R1  // zone
 	MOVW	$0, R2	// see issue 16570
@@ -171,9 +171,9 @@ TEXT time·now(SB), 7, $32
 	MOVW	12(R13), R1
 inreg:
 	MOVW    R1, R2  // usec
-	MOVW	R0, sec+0(FP)
+	MOVW	R0, sec_lo+0(FP)
 	MOVW	$0, R1
-	MOVW	R1, loc+4(FP)
+	MOVW	R1, sec_hi+4(FP)
 	MOVW	$1000, R3
 	MUL	R3, R2
 	MOVW	R2, nsec+8(FP)
@@ -286,7 +286,7 @@ ret:
 	B	runtime·exit(SB)
 
 TEXT runtime·sigprocmask(SB),NOSPLIT,$0
-	MOVW	sig+0(FP), R0
+	MOVW	how+0(FP), R0
 	MOVW	new+4(FP), R1
 	MOVW	old+8(FP), R2
 	MOVW	$SYS_pthread_sigmask, R12

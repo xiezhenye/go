@@ -102,16 +102,16 @@ TEXT runtime·nsec(SB),NOSPLIT,$8
 	MOVL	$-1, ret_hi+8(FP)
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB),NOSPLIT,$8-12
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB),NOSPLIT,$8-12
 	CALL	runtime·nanotime(SB)
 	MOVL	0(SP), AX
 	MOVL	4(SP), DX
 
 	MOVL	$1000000000, CX
 	DIVL	CX
-	MOVL	AX, sec+0(FP)
-	MOVL	$0, sec+4(FP)
+	MOVL	AX, sec_lo+0(FP)
+	MOVL	$0, sec_hi+4(FP)
 	MOVL	DX, nsec+8(FP)
 	RET
 
@@ -178,8 +178,8 @@ TEXT runtime·sigtramp(SB),NOSPLIT,$0
 	RET
 
 	// save args
-	MOVL	ureg+4(SP), CX
-	MOVL	note+8(SP), DX
+	MOVL	ureg+0(FP), CX
+	MOVL	note+4(FP), DX
 
 	// change stack
 	MOVL	g_m(BX), BX

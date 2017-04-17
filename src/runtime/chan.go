@@ -7,10 +7,16 @@ package runtime
 // This file contains the implementation of Go channels.
 
 // Invariants:
-//  At least one of c.sendq and c.recvq is empty.
+//  At least one of c.sendq and c.recvq is empty,
+//  except for the case of an unbuffered channel with a single goroutine
+//  blocked on it for both sending and receiving using a select statement,
+//  in which case the length of c.sendq and c.recvq is limited only by the
+//  size of the select statement.
+//
 // For buffered channels, also:
 //  c.qcount > 0 implies that c.recvq is empty.
 //  c.qcount < c.dataqsiz implies that c.sendq is empty.
+
 import (
 	"runtime/internal/atomic"
 	"unsafe"
@@ -103,8 +109,8 @@ func chanbuf(c *hchan, i uint) unsafe.Pointer {
 
 // entry point for c <- x from compiled code
 //go:nosplit
-func chansend1(t *chantype, c *hchan, elem unsafe.Pointer) {
-	chansend(t, c, elem, true, getcallerpc(unsafe.Pointer(&t)))
+func chansend1(c *hchan, elem unsafe.Pointer) {
+	chansend(c, elem, true, getcallerpc(unsafe.Pointer(&c)))
 }
 
 /*
@@ -119,14 +125,7 @@ func chansend1(t *chantype, c *hchan, elem unsafe.Pointer) {
  * been closed.  it is easiest to loop and re-run
  * the operation; we'll see that it's now closed.
  */
-func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
-	if raceenabled {
-		raceReadObjectPC(t.elem, ep, callerpc, funcPC(chansend))
-	}
-	if msanenabled {
-		msanread(ep, t.elem.size)
-	}
-
+func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	if c == nil {
 		if !block {
 			return false
@@ -177,7 +176,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 	if sg := c.recvq.dequeue(); sg != nil {
 		// Found a waiting receiver. We pass the value we want to send
 		// directly to the receiver, bypassing the channel buffer (if any).
-		send(c, sg, ep, func() { unlock(&c.lock) })
+		send(c, sg, ep, func() { unlock(&c.lock) }, 3)
 		return true
 	}
 
@@ -248,7 +247,7 @@ func chansend(t *chantype, c *hchan, ep unsafe.Pointer, block bool, callerpc uin
 // Channel c must be empty and locked.  send unlocks c with unlockf.
 // sg must already be dequeued from c.
 // ep must be non-nil and point to the heap or the caller's stack.
-func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
+func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 	if raceenabled {
 		if c.dataqsiz == 0 {
 			racesync(c, sg)
@@ -278,26 +277,37 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
 	}
-	goready(gp, 4)
+	goready(gp, skip+1)
 }
 
+// Sends and receives on unbuffered or empty-buffered channels are the
+// only operations where one running goroutine writes to the stack of
+// another running goroutine. The GC assumes that stack writes only
+// happen when the goroutine is running and are only done by that
+// goroutine. Using a write barrier is sufficient to make up for
+// violating that assumption, but the write barrier has to work.
+// typedmemmove will call bulkBarrierPreWrite, but the target bytes
+// are not in the heap, so that will not help. We arrange to call
+// memmove and typeBitsBulkBarrier instead.
+
 func sendDirect(t *_type, sg *sudog, src unsafe.Pointer) {
-	// Send on an unbuffered or empty-buffered channel is the only operation
-	// in the entire runtime where one goroutine
-	// writes to the stack of another goroutine. The GC assumes that
-	// stack writes only happen when the goroutine is running and are
-	// only done by that goroutine. Using a write barrier is sufficient to
-	// make up for violating that assumption, but the write barrier has to work.
-	// typedmemmove will call heapBitsBulkBarrier, but the target bytes
-	// are not in the heap, so that will not help. We arrange to call
-	// memmove and typeBitsBulkBarrier instead.
+	// src is on our stack, dst is a slot on another stack.
 
 	// Once we read sg.elem out of sg, it will no longer
 	// be updated if the destination's stack gets copied (shrunk).
 	// So make sure that no preemption points can happen between read & use.
 	dst := sg.elem
+	typeBitsBulkBarrier(t, uintptr(dst), uintptr(src), t.size)
 	memmove(dst, src, t.size)
-	typeBitsBulkBarrier(t, uintptr(dst), t.size)
+}
+
+func recvDirect(t *_type, sg *sudog, dst unsafe.Pointer) {
+	// dst is on our stack or the heap, src is on another stack.
+	// The channel is locked, so src will not move during this
+	// operation.
+	src := sg.elem
+	typeBitsBulkBarrier(t, uintptr(dst), uintptr(src), t.size)
+	memmove(dst, src, t.size)
 }
 
 func closechan(c *hchan) {
@@ -328,7 +338,7 @@ func closechan(c *hchan) {
 			break
 		}
 		if sg.elem != nil {
-			memclr(sg.elem, uintptr(c.elemsize))
+			typedmemclr(c.elemtype, sg.elem)
 			sg.elem = nil
 		}
 		if sg.releasetime != 0 {
@@ -374,13 +384,13 @@ func closechan(c *hchan) {
 
 // entry points for <- c from compiled code
 //go:nosplit
-func chanrecv1(t *chantype, c *hchan, elem unsafe.Pointer) {
-	chanrecv(t, c, elem, true)
+func chanrecv1(c *hchan, elem unsafe.Pointer) {
+	chanrecv(c, elem, true)
 }
 
 //go:nosplit
-func chanrecv2(t *chantype, c *hchan, elem unsafe.Pointer) (received bool) {
-	_, received = chanrecv(t, c, elem, true)
+func chanrecv2(c *hchan, elem unsafe.Pointer) (received bool) {
+	_, received = chanrecv(c, elem, true)
 	return
 }
 
@@ -390,7 +400,7 @@ func chanrecv2(t *chantype, c *hchan, elem unsafe.Pointer) (received bool) {
 // Otherwise, if c is closed, zeros *ep and returns (true, false).
 // Otherwise, fills in *ep with an element and returns (true, true).
 // A non-nil ep must point to the heap or the caller's stack.
-func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, received bool) {
+func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool) {
 	// raceenabled: don't need to check ep, as it is always on the stack
 	// or is new memory allocated by reflect.
 
@@ -437,7 +447,7 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		}
 		unlock(&c.lock)
 		if ep != nil {
-			memclr(ep, uintptr(c.elemsize))
+			typedmemclr(c.elemtype, ep)
 		}
 		return true, false
 	}
@@ -447,7 +457,7 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		// directly from sender. Otherwise, receive from head of queue
 		// and add sender's value to the tail of the queue (both map to
 		// the same buffer slot because the queue is full).
-		recv(c, sg, ep, func() { unlock(&c.lock) })
+		recv(c, sg, ep, func() { unlock(&c.lock) }, 3)
 		return true, true
 	}
 
@@ -461,7 +471,7 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 		if ep != nil {
 			typedmemmove(c.elemtype, ep, qp)
 		}
-		memclr(qp, uintptr(c.elemsize))
+		typedmemclr(c.elemtype, qp)
 		c.recvx++
 		if c.recvx == c.dataqsiz {
 			c.recvx = 0
@@ -523,16 +533,14 @@ func chanrecv(t *chantype, c *hchan, ep unsafe.Pointer, block bool) (selected, r
 // Channel c must be full and locked. recv unlocks c with unlockf.
 // sg must already be dequeued from c.
 // A non-nil ep must point to the heap or the caller's stack.
-func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
+func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 	if c.dataqsiz == 0 {
 		if raceenabled {
 			racesync(c, sg)
 		}
 		if ep != nil {
 			// copy data from sender
-			// ep points to our own stack or heap, so nothing
-			// special (ala sendDirect) needed here.
-			typedmemmove(c.elemtype, ep, sg.elem)
+			recvDirect(c.elemtype, sg, ep)
 		}
 	} else {
 		// Queue is full. Take the item at the
@@ -565,7 +573,7 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
 	}
-	goready(gp, 4)
+	goready(gp, skip+1)
 }
 
 // compiler implements
@@ -585,8 +593,8 @@ func recv(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func()) {
 //		... bar
 //	}
 //
-func selectnbsend(t *chantype, c *hchan, elem unsafe.Pointer) (selected bool) {
-	return chansend(t, c, elem, false, getcallerpc(unsafe.Pointer(&t)))
+func selectnbsend(c *hchan, elem unsafe.Pointer) (selected bool) {
+	return chansend(c, elem, false, getcallerpc(unsafe.Pointer(&c)))
 }
 
 // compiler implements
@@ -606,8 +614,8 @@ func selectnbsend(t *chantype, c *hchan, elem unsafe.Pointer) (selected bool) {
 //		... bar
 //	}
 //
-func selectnbrecv(t *chantype, elem unsafe.Pointer, c *hchan) (selected bool) {
-	selected, _ = chanrecv(t, c, elem, false)
+func selectnbrecv(elem unsafe.Pointer, c *hchan) (selected bool) {
+	selected, _ = chanrecv(c, elem, false)
 	return
 }
 
@@ -628,20 +636,20 @@ func selectnbrecv(t *chantype, elem unsafe.Pointer, c *hchan) (selected bool) {
 //		... bar
 //	}
 //
-func selectnbrecv2(t *chantype, elem unsafe.Pointer, received *bool, c *hchan) (selected bool) {
+func selectnbrecv2(elem unsafe.Pointer, received *bool, c *hchan) (selected bool) {
 	// TODO(khr): just return 2 values from this function, now that it is in Go.
-	selected, *received = chanrecv(t, c, elem, false)
+	selected, *received = chanrecv(c, elem, false)
 	return
 }
 
 //go:linkname reflect_chansend reflect.chansend
-func reflect_chansend(t *chantype, c *hchan, elem unsafe.Pointer, nb bool) (selected bool) {
-	return chansend(t, c, elem, !nb, getcallerpc(unsafe.Pointer(&t)))
+func reflect_chansend(c *hchan, elem unsafe.Pointer, nb bool) (selected bool) {
+	return chansend(c, elem, !nb, getcallerpc(unsafe.Pointer(&c)))
 }
 
 //go:linkname reflect_chanrecv reflect.chanrecv
-func reflect_chanrecv(t *chantype, c *hchan, nb bool, elem unsafe.Pointer) (selected bool, received bool) {
-	return chanrecv(t, c, elem, !nb)
+func reflect_chanrecv(c *hchan, nb bool, elem unsafe.Pointer) (selected bool, received bool) {
+	return chanrecv(c, elem, !nb)
 }
 
 //go:linkname reflect_chanlen reflect.chanlen

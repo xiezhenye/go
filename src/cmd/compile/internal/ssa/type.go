@@ -4,6 +4,8 @@
 
 package ssa
 
+import "cmd/internal/obj"
+
 // TODO: use go/types instead?
 
 // A type interface used to import cmd/internal/gc:Type
@@ -33,15 +35,18 @@ type Type interface {
 	PtrTo() Type    // given T, return *T
 
 	NumFields() int         // # of fields of a struct
-	FieldType(i int) Type   // type of ith field of the struct
+	FieldType(i int) Type   // type of ith field of the struct or ith part of a tuple
 	FieldOff(i int) int64   // offset of ith field of the struct
 	FieldName(i int) string // name of ith field of the struct
 
 	NumElem() int64 // # of elements of an array
 
+	HasPointer() bool // has heap pointer
+
 	String() string
 	SimpleString() string // a coarser generic description of T, e.g. T's underlying type
 	Compare(Type) Cmp     // compare types, returning one of CMPlt, CMPeq, CMPgt.
+	Symbol() *obj.LSym    // the symbol of the type
 }
 
 // Special compiler-only types.
@@ -80,38 +85,52 @@ func (t *CompilerType) FieldType(i int) Type   { panic("not implemented") }
 func (t *CompilerType) FieldOff(i int) int64   { panic("not implemented") }
 func (t *CompilerType) FieldName(i int) string { panic("not implemented") }
 func (t *CompilerType) NumElem() int64         { panic("not implemented") }
+func (t *CompilerType) HasPointer() bool       { panic("not implemented") }
+func (t *CompilerType) Symbol() *obj.LSym      { panic("not implemented") }
 
 type TupleType struct {
 	first  Type
 	second Type
+	// Any tuple with a memory type must put that memory type second.
 }
 
-func (t *TupleType) Size() int64            { panic("not implemented") }
-func (t *TupleType) Alignment() int64       { panic("not implemented") }
-func (t *TupleType) IsBoolean() bool        { return false }
-func (t *TupleType) IsInteger() bool        { return false }
-func (t *TupleType) IsSigned() bool         { return false }
-func (t *TupleType) IsFloat() bool          { return false }
-func (t *TupleType) IsComplex() bool        { return false }
-func (t *TupleType) IsPtrShaped() bool      { return false }
-func (t *TupleType) IsString() bool         { return false }
-func (t *TupleType) IsSlice() bool          { return false }
-func (t *TupleType) IsArray() bool          { return false }
-func (t *TupleType) IsStruct() bool         { return false }
-func (t *TupleType) IsInterface() bool      { return false }
-func (t *TupleType) IsMemory() bool         { return false }
-func (t *TupleType) IsFlags() bool          { return false }
-func (t *TupleType) IsVoid() bool           { return false }
-func (t *TupleType) IsTuple() bool          { return true }
-func (t *TupleType) String() string         { return t.first.String() + "," + t.second.String() }
-func (t *TupleType) SimpleString() string   { return "Tuple" }
-func (t *TupleType) ElemType() Type         { panic("not implemented") }
-func (t *TupleType) PtrTo() Type            { panic("not implemented") }
-func (t *TupleType) NumFields() int         { panic("not implemented") }
-func (t *TupleType) FieldType(i int) Type   { panic("not implemented") }
+func (t *TupleType) Size() int64          { panic("not implemented") }
+func (t *TupleType) Alignment() int64     { panic("not implemented") }
+func (t *TupleType) IsBoolean() bool      { return false }
+func (t *TupleType) IsInteger() bool      { return false }
+func (t *TupleType) IsSigned() bool       { return false }
+func (t *TupleType) IsFloat() bool        { return false }
+func (t *TupleType) IsComplex() bool      { return false }
+func (t *TupleType) IsPtrShaped() bool    { return false }
+func (t *TupleType) IsString() bool       { return false }
+func (t *TupleType) IsSlice() bool        { return false }
+func (t *TupleType) IsArray() bool        { return false }
+func (t *TupleType) IsStruct() bool       { return false }
+func (t *TupleType) IsInterface() bool    { return false }
+func (t *TupleType) IsMemory() bool       { return false }
+func (t *TupleType) IsFlags() bool        { return false }
+func (t *TupleType) IsVoid() bool         { return false }
+func (t *TupleType) IsTuple() bool        { return true }
+func (t *TupleType) String() string       { return t.first.String() + "," + t.second.String() }
+func (t *TupleType) SimpleString() string { return "Tuple" }
+func (t *TupleType) ElemType() Type       { panic("not implemented") }
+func (t *TupleType) PtrTo() Type          { panic("not implemented") }
+func (t *TupleType) NumFields() int       { panic("not implemented") }
+func (t *TupleType) FieldType(i int) Type {
+	switch i {
+	case 0:
+		return t.first
+	case 1:
+		return t.second
+	default:
+		panic("bad tuple index")
+	}
+}
 func (t *TupleType) FieldOff(i int) int64   { panic("not implemented") }
 func (t *TupleType) FieldName(i int) string { panic("not implemented") }
 func (t *TupleType) NumElem() int64         { panic("not implemented") }
+func (t *TupleType) HasPointer() bool       { panic("not implemented") }
+func (t *TupleType) Symbol() *obj.LSym      { panic("not implemented") }
 
 // Cmp is a comparison between values a and b.
 // -1 if a < b

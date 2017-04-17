@@ -110,11 +110,16 @@ func TestDateParsing(t *testing.T) {
 		}
 		date, err := hdr.Date()
 		if err != nil {
-			t.Errorf("Failed parsing %q: %v", test.dateStr, err)
-			continue
+			t.Errorf("Header(Date: %s).Date(): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("Header(Date: %s).Date() = %+v, want %+v", test.dateStr, date, test.exp)
 		}
-		if !date.Equal(test.exp) {
-			t.Errorf("Parse of %q: got %+v, want %+v", test.dateStr, date, test.exp)
+
+		date, err = ParseDate(test.dateStr)
+		if err != nil {
+			t.Errorf("ParseDate(%s): %v", test.dateStr, err)
+		} else if !date.Equal(test.exp) {
+			t.Errorf("ParseDate(%s) = %+v, want %+v", test.dateStr, date, test.exp)
 		}
 	}
 }
@@ -131,6 +136,7 @@ func TestAddressParsingError(t *testing.T) {
 		4: {"\"\\" + string([]byte{0x80}) + "\" <escaped-invalid-unicode@example.net>", "invalid utf-8 in quoted-string"},
 		5: {"\"\x00\" <null@example.net>", "bad character in quoted-string"},
 		6: {"\"\\\x00\" <escaped-null@example.net>", "bad character in quoted-string"},
+		7: {"John Doe", "no angle-addr"},
 	}
 
 	for i, tc := range mustErrTestCases {
@@ -230,6 +236,16 @@ func TestAddressParsing(t *testing.T) {
 				},
 			},
 		},
+		// RFC 2047 "Q"-encoded UTF-8 address with multiple encoded-words.
+		{
+			`=?utf-8?q?J=C3=B6rg?=  =?utf-8?q?Doe?= <joerg@example.com>`,
+			[]*Address{
+				{
+					Name:    `JörgDoe`,
+					Address: "joerg@example.com",
+				},
+			},
+		},
 		// RFC 2047, Section 8.
 		{
 			`=?ISO-8859-1?Q?Andr=E9?= Pirard <PIRARD@vm1.ulg.ac.be>`,
@@ -307,6 +323,16 @@ func TestAddressParsing(t *testing.T) {
 				{
 					Name:    `Micro`,
 					Address: "micro@µ.example.com",
+				},
+			},
+		},
+		// Issue 14866
+		{
+			`"" <emptystring@example.com>`,
+			[]*Address{
+				{
+					Name:    "",
+					Address: "emptystring@example.com",
 				},
 			},
 		},

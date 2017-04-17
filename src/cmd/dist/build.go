@@ -21,30 +21,31 @@ import (
 
 // The usual variables.
 var (
-	goarch           string
-	gobin            string
-	gohostarch       string
-	gohostos         string
-	goos             string
-	goarm            string
-	go386            string
-	goroot           string
-	goroot_final     string
-	goextlinkenabled string
-	gogcflags        string // For running built compiler
-	workdir          string
-	tooldir          string
-	oldgoos          string
-	oldgoarch        string
-	slash            string
-	exe              string
-	defaultcc        string
-	defaultcflags    string
-	defaultldflags   string
-	defaultcxxtarget string
-	defaultcctarget  string
-	rebuildall       bool
-	defaultclang     bool
+	goarch                 string
+	gobin                  string
+	gohostarch             string
+	gohostos               string
+	goos                   string
+	goarm                  string
+	go386                  string
+	goroot                 string
+	goroot_final           string
+	goextlinkenabled       string
+	gogcflags              string // For running built compiler
+	workdir                string
+	tooldir                string
+	oldgoos                string
+	oldgoarch              string
+	slash                  string
+	exe                    string
+	defaultcc              string
+	defaultcflags          string
+	defaultldflags         string
+	defaultcxxtarget       string
+	defaultcctarget        string
+	defaultpkgconfigtarget string
+	rebuildall             bool
+	defaultclang           bool
 
 	vflag int // verbosity
 )
@@ -56,6 +57,8 @@ var okgoarch = []string{
 	"amd64p32",
 	"arm",
 	"arm64",
+	"mips",
+	"mipsle",
 	"mips64",
 	"mips64le",
 	"ppc64",
@@ -207,6 +210,12 @@ func xinit() {
 		}
 	}
 	defaultcxxtarget = b
+
+	b = os.Getenv("PKG_CONFIG")
+	if b == "" {
+		b = "pkg-config"
+	}
+	defaultpkgconfigtarget = b
 
 	// For tools being invoked but also for os.ExpandEnv.
 	os.Setenv("GO386", go386)
@@ -462,7 +471,7 @@ var deptab = []struct {
 	prefix string   // prefix of target
 	dep    []string // dependency tweaks for targets with that prefix
 }{
-	{"cmd/go", []string{
+	{"cmd/go/internal/cfg", []string{
 		"zdefaultcc.go",
 		"zosarch.go",
 	}},
@@ -534,7 +543,7 @@ func install(dir string) {
 	path := pathf("%s/src/%s", goroot, dir)
 	name := filepath.Base(dir)
 
-	ispkg := !strings.HasPrefix(dir, "cmd/") || strings.HasPrefix(dir, "cmd/internal/") || strings.HasPrefix(dir, "cmd/asm/internal/")
+	ispkg := !strings.HasPrefix(dir, "cmd/") || strings.Contains(dir, "/internal/")
 
 	// Start final link command line.
 	// Note: code below knows that link.p[targ] is the target.
@@ -773,9 +782,8 @@ func matchtag(tag string) bool {
 
 // shouldbuild reports whether we should build this file.
 // It applies the same rules that are used with context tags
-// in package go/build, except that the GOOS and GOARCH
-// can appear anywhere in the file name, not just after _.
-// In particular, they can be the entire file name (like windows.c).
+// in package go/build, except it's less picky about the order
+// of GOOS and GOARCH.
 // We also allow the special tag cmd_go_bootstrap.
 // See ../go/bootstrap.go and package go/build.
 func shouldbuild(file, dir string) bool {
@@ -787,7 +795,7 @@ func shouldbuild(file, dir string) bool {
 				continue
 			}
 			i := strings.Index(name, x)
-			if i < 0 {
+			if i <= 0 || name[i-1] != '_' {
 				continue
 			}
 			i += len(x)
@@ -1098,6 +1106,8 @@ var cgoEnabled = map[string]bool{
 	"linux/arm64":     true,
 	"linux/ppc64":     false,
 	"linux/ppc64le":   true,
+	"linux/mips":      true,
+	"linux/mipsle":    true,
 	"linux/mips64":    true,
 	"linux/mips64le":  true,
 	"linux/s390x":     true,

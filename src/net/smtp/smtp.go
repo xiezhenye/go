@@ -9,7 +9,7 @@
 //	STARTTLS  RFC 3207
 // Additional extensions may be handled by clients.
 //
-// The smtp package is frozen and not accepting new features.
+// The smtp package is frozen and is not accepting new features.
 // Some external packages provide more functionality. See:
 //
 //   https://godoc.org/?q=smtp
@@ -19,6 +19,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/textproto"
@@ -200,7 +201,7 @@ func (c *Client) Auth(a Auth) error {
 	}
 	resp64 := make([]byte, encoding.EncodedLen(len(resp)))
 	encoding.Encode(resp64, resp)
-	code, msg64, err := c.cmd(0, "AUTH %s %s", mech, resp64)
+	code, msg64, err := c.cmd(0, strings.TrimSpace(fmt.Sprintf("AUTH %s %s", mech, resp64)))
 	for err == nil {
 		var msg []byte
 		switch code {
@@ -297,7 +298,7 @@ var testHookStartTLS func(*tls.Config) // nil, except for tests
 // messages is accomplished by including an email address in the to
 // parameter but not including it in the msg headers.
 //
-// The SendMail function and the the net/smtp package are low-level
+// The SendMail function and the net/smtp package are low-level
 // mechanisms and provide no support for DKIM signing, MIME
 // attachments (see the mime/multipart package), or other mail
 // functionality. Higher-level packages exist outside of the standard

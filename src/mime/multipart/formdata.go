@@ -79,15 +79,19 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 			if err != nil {
 				return nil, err
 			}
-			defer file.Close()
-			_, err = io.Copy(file, io.MultiReader(&b, p))
+			size, err := io.Copy(file, io.MultiReader(&b, p))
+			if cerr := file.Close(); err == nil {
+				err = cerr
+			}
 			if err != nil {
 				os.Remove(file.Name())
 				return nil, err
 			}
 			fh.tmpfile = file.Name()
+			fh.Size = size
 		} else {
 			fh.content = b.Bytes()
+			fh.Size = int64(len(fh.content))
 			maxMemory -= n
 		}
 		form.File[name] = append(form.File[name], fh)
@@ -126,6 +130,7 @@ func (f *Form) RemoveAll() error {
 type FileHeader struct {
 	Filename string
 	Header   textproto.MIMEHeader
+	Size     int64
 
 	content []byte
 	tmpfile string

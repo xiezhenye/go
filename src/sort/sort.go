@@ -2,9 +2,13 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+//go:generate go run genzfunc.go
+
 // Package sort provides primitives for sorting slices and user-defined
 // collections.
 package sort
+
+import "reflect"
 
 // A type, typically a collection, that satisfies sort.Interface can be
 // sorted by the routines in this package. The methods require that the
@@ -92,7 +96,7 @@ func swapRange(data Interface, a, b, n int) {
 }
 
 func doPivot(data Interface, lo, hi int) (midlo, midhi int) {
-	m := lo + (hi-lo)/2 // Written like this to avoid integer overflow.
+	m := int(uint(lo+hi) >> 1) // Written like this to avoid integer overflow.
 	if hi-lo > 40 {
 		// Tukey's ``Ninther,'' median of three medians of three.
 		s := (hi - lo) / 8
@@ -212,14 +216,63 @@ func quickSort(data Interface, a, b, maxDepth int) {
 // It makes one call to data.Len to determine n, and O(n*log(n)) calls to
 // data.Less and data.Swap. The sort is not guaranteed to be stable.
 func Sort(data Interface) {
-	// Switch to heapsort if depth of 2*ceil(lg(n+1)) is reached.
 	n := data.Len()
-	maxDepth := 0
+	quickSort(data, 0, n, maxDepth(n))
+}
+
+// maxDepth returns a threshold at which quicksort should switch
+// to heapsort. It returns 2*ceil(lg(n+1)).
+func maxDepth(n int) int {
+	var depth int
 	for i := n; i > 0; i >>= 1 {
-		maxDepth++
+		depth++
 	}
-	maxDepth *= 2
-	quickSort(data, 0, n, maxDepth)
+	return depth * 2
+}
+
+// lessSwap is a pair of Less and Swap function for use with the
+// auto-generated func-optimized variant of sort.go in
+// zfuncversion.go.
+type lessSwap struct {
+	Less func(i, j int) bool
+	Swap func(i, j int)
+}
+
+// Slice sorts the provided slice given the provided less function.
+//
+// The sort is not guaranteed to be stable. For a stable sort, use
+// SliceStable.
+//
+// The function panics if the provided interface is not a slice.
+func Slice(slice interface{}, less func(i, j int) bool) {
+	rv := reflect.ValueOf(slice)
+	swap := reflect.Swapper(slice)
+	length := rv.Len()
+	quickSort_func(lessSwap{less, swap}, 0, length, maxDepth(length))
+}
+
+// SliceStable sorts the provided slice given the provided less
+// function while keeping the original order of equal elements.
+//
+// The function panics if the provided interface is not a slice.
+func SliceStable(slice interface{}, less func(i, j int) bool) {
+	rv := reflect.ValueOf(slice)
+	swap := reflect.Swapper(slice)
+	stable_func(lessSwap{less, swap}, rv.Len())
+}
+
+// SliceIsSorted tests whether a slice is sorted.
+//
+// The function panics if the provided interface is not a slice.
+func SliceIsSorted(slice interface{}, less func(i, j int) bool) bool {
+	rv := reflect.ValueOf(slice)
+	n := rv.Len()
+	for i := n - 1; i > 0; i-- {
+		if less(i, i-1) {
+			return false
+		}
+	}
+	return true
 }
 
 type reverse struct {
@@ -337,7 +390,10 @@ func StringsAreSorted(a []string) bool { return IsSorted(StringSlice(a)) }
 // It makes one call to data.Len to determine n, O(n*log(n)) calls to
 // data.Less and O(n*log(n)*log(n)) calls to data.Swap.
 func Stable(data Interface) {
-	n := data.Len()
+	stable(data, data.Len())
+}
+
+func stable(data Interface, n int) {
 	blockSize := 20 // must be > 0
 	a, b := 0, blockSize
 	for b <= n {
@@ -391,7 +447,7 @@ func symMerge(data Interface, a, m, b int) {
 		i := m
 		j := b
 		for i < j {
-			h := i + (j-i)/2
+			h := int(uint(i+j) >> 1)
 			if data.Less(h, a) {
 				i = h + 1
 			} else {
@@ -415,7 +471,7 @@ func symMerge(data Interface, a, m, b int) {
 		i := a
 		j := m
 		for i < j {
-			h := i + (j-i)/2
+			h := int(uint(i+j) >> 1)
 			if !data.Less(m, h) {
 				i = h + 1
 			} else {
@@ -429,7 +485,7 @@ func symMerge(data Interface, a, m, b int) {
 		return
 	}
 
-	mid := a + (b-a)/2
+	mid := int(uint(a+b) >> 1)
 	n := mid + m
 	var start, r int
 	if m > mid {
@@ -442,7 +498,7 @@ func symMerge(data Interface, a, m, b int) {
 	p := n - 1
 
 	for start < r {
-		c := start + (r-start)/2
+		c := int(uint(start+r) >> 1)
 		if !data.Less(p-c, c) {
 			start = c + 1
 		} else {

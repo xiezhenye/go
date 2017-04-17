@@ -14,4 +14,4 @@ func main() {
 	}
 }
 
-var _ = c <- v // ERROR "used as value"
+var _ = c <- v // ERROR "unexpected <-"

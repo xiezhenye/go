@@ -52,6 +52,11 @@ import (
 //      the explicit name in a struct field tag of the form "name,attr",
 //      Unmarshal records the attribute value in that field.
 //
+//   * If the XML element has an attribute not handled by the previous
+//      rule and the struct has a field with an associated tag containing
+//      ",any,attr", Unmarshal records the attribute value in the first
+//      such field.
+//
 //   * If the XML element contains character data, that data is
 //      accumulated in the first struct field that has tag ",chardata".
 //      The struct field may have type []byte or string.
@@ -85,7 +90,7 @@ import (
 //   * An anonymous struct field is handled as if the fields of its
 //      value were part of the outer struct.
 //
-//   * A struct field with tag "-" is never unmarshalled into.
+//   * A struct field with tag "-" is never unmarshaled into.
 //
 // Unmarshal maps an XML element to a string or []byte by saving the
 // concatenation of that element's character data in the string or
@@ -94,8 +99,12 @@ import (
 // Unmarshal maps an attribute value to a string or []byte by saving
 // the value in the string or slice.
 //
-// Unmarshal maps an XML element to a slice by extending the length of
-// the slice and mapping the element to the newly created value.
+// Unmarshal maps an attribute value to an Attr by saving the attribute,
+// including its name, in the Attr.
+//
+// Unmarshal maps an XML element or attribute value to a slice by
+// extending the length of the slice and mapping the element or attribute
+// to the newly created value.
 //
 // Unmarshal maps an XML element or attribute value to a bool by
 // setting it to the boolean value represented by the string.
@@ -111,6 +120,9 @@ import (
 // Unmarshal maps an XML element to a pointer by setting the pointer
 // to a freshly allocated value and then mapping the element to that value.
 //
+// A missing element or empty attribute value will be unmarshaled as a zero value.
+// If the field is a slice, a zero value will be appended to the field. Otherwise, the
+// field will be set to its zero value.
 func Unmarshal(data []byte, v interface{}) error {
 	return NewDecoder(bytes.NewReader(data)).Decode(v)
 }
@@ -133,7 +145,7 @@ func (d *Decoder) DecodeElement(v interface{}, start *StartElement) error {
 	return d.unmarshal(val.Elem(), start)
 }
 
-// An UnmarshalError represents an error in the unmarshalling process.
+// An UnmarshalError represents an error in the unmarshaling process.
 type UnmarshalError string
 
 func (e UnmarshalError) Error() string { return string(e) }
@@ -202,7 +214,7 @@ func (p *Decoder) unmarshalInterface(val Unmarshaler, start *StartElement) error
 // unmarshalTextInterface unmarshals a single XML element into val.
 // The chardata contained in the element (but not its children)
 // is passed to the text unmarshaler.
-func (p *Decoder) unmarshalTextInterface(val encoding.TextUnmarshaler, start *StartElement) error {
+func (p *Decoder) unmarshalTextInterface(val encoding.TextUnmarshaler) error {
 	var buf []byte
 	depth := 1
 	for depth > 0 {
@@ -232,7 +244,6 @@ func (p *Decoder) unmarshalAttr(val reflect.Value, attr Attr) error {
 		}
 		val = val.Elem()
 	}
-
 	if val.CanInterface() && val.Type().Implements(unmarshalerAttrType) {
 		// This is an unmarshaler with a non-pointer receiver,
 		// so it's likely to be incorrect, but we do what we're told.
@@ -258,11 +269,30 @@ func (p *Decoder) unmarshalAttr(val reflect.Value, attr Attr) error {
 		}
 	}
 
-	copyValue(val, []byte(attr.Value))
-	return nil
+	if val.Type().Kind() == reflect.Slice && val.Type().Elem().Kind() != reflect.Uint8 {
+		// Slice of element values.
+		// Grow slice.
+		n := val.Len()
+		val.Set(reflect.Append(val, reflect.Zero(val.Type().Elem())))
+
+		// Recur to read element into slice.
+		if err := p.unmarshalAttr(val.Index(n), attr); err != nil {
+			val.SetLen(n)
+			return err
+		}
+		return nil
+	}
+
+	if val.Type() == attrType {
+		val.Set(reflect.ValueOf(attr))
+		return nil
+	}
+
+	return copyValue(val, []byte(attr.Value))
 }
 
 var (
+	attrType            = reflect.TypeOf(Attr{})
 	unmarshalerType     = reflect.TypeOf((*Unmarshaler)(nil)).Elem()
 	unmarshalerAttrType = reflect.TypeOf((*UnmarshalerAttr)(nil)).Elem()
 	textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
@@ -314,13 +344,13 @@ func (p *Decoder) unmarshal(val reflect.Value, start *StartElement) error {
 	}
 
 	if val.CanInterface() && val.Type().Implements(textUnmarshalerType) {
-		return p.unmarshalTextInterface(val.Interface().(encoding.TextUnmarshaler), start)
+		return p.unmarshalTextInterface(val.Interface().(encoding.TextUnmarshaler))
 	}
 
 	if val.CanAddr() {
 		pv := val.Addr()
 		if pv.CanInterface() && pv.Type().Implements(textUnmarshalerType) {
-			return p.unmarshalTextInterface(pv.Interface().(encoding.TextUnmarshaler), start)
+			return p.unmarshalTextInterface(pv.Interface().(encoding.TextUnmarshaler))
 		}
 	}
 
@@ -359,16 +389,7 @@ func (p *Decoder) unmarshal(val reflect.Value, start *StartElement) error {
 		// Slice of element values.
 		// Grow slice.
 		n := v.Len()
-		if n >= v.Cap() {
-			ncap := 2 * n
-			if ncap < 4 {
-				ncap = 4
-			}
-			new := reflect.MakeSlice(typ, n, ncap)
-			reflect.Copy(new, v)
-			v.Set(new)
-		}
-		v.SetLen(n + 1)
+		v.Set(reflect.Append(val, reflect.Zero(v.Type().Elem())))
 
 		// Recur to read element into slice.
 		if err := p.unmarshal(v.Index(n), start); err != nil {
@@ -415,22 +436,40 @@ func (p *Decoder) unmarshal(val reflect.Value, start *StartElement) error {
 		}
 
 		// Assign attributes.
-		// Also, determine whether we need to save character data or comments.
-		for i := range tinfo.fields {
-			finfo := &tinfo.fields[i]
-			switch finfo.flags & fMode {
-			case fAttr:
-				strv := finfo.value(sv)
-				// Look for attribute.
-				for _, a := range start.Attr {
+		for _, a := range start.Attr {
+			handled := false
+			any := -1
+			for i := range tinfo.fields {
+				finfo := &tinfo.fields[i]
+				switch finfo.flags & fMode {
+				case fAttr:
+					strv := finfo.value(sv)
 					if a.Name.Local == finfo.name && (finfo.xmlns == "" || finfo.xmlns == a.Name.Space) {
 						if err := p.unmarshalAttr(strv, a); err != nil {
 							return err
 						}
-						break
+						handled = true
+					}
+
+				case fAny | fAttr:
+					if any == -1 {
+						any = i
 					}
 				}
+			}
+			if !handled && any >= 0 {
+				finfo := &tinfo.fields[any]
+				strv := finfo.value(sv)
+				if err := p.unmarshalAttr(strv, a); err != nil {
+					return err
+				}
+			}
+		}
 
+		// Determine whether we need to save character data or comments.
+		for i := range tinfo.fields {
+			finfo := &tinfo.fields[i]
+			switch finfo.flags & fMode {
 			case fCDATA, fCharData:
 				if !saveData.IsValid() {
 					saveData = finfo.value(sv)
@@ -546,7 +585,9 @@ Loop:
 	case reflect.String:
 		t.SetString(string(saveXMLData))
 	case reflect.Slice:
-		t.Set(reflect.ValueOf(saveXMLData))
+		if t.Type().Elem().Kind() == reflect.Uint8 {
+			t.Set(reflect.ValueOf(saveXMLData))
+		}
 	}
 
 	return nil
@@ -569,24 +610,40 @@ func copyValue(dst reflect.Value, src []byte) (err error) {
 	default:
 		return errors.New("cannot unmarshal into " + dst0.Type().String())
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		if len(src) == 0 {
+			dst.SetInt(0)
+			return nil
+		}
 		itmp, err := strconv.ParseInt(string(src), 10, dst.Type().Bits())
 		if err != nil {
 			return err
 		}
 		dst.SetInt(itmp)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		if len(src) == 0 {
+			dst.SetUint(0)
+			return nil
+		}
 		utmp, err := strconv.ParseUint(string(src), 10, dst.Type().Bits())
 		if err != nil {
 			return err
 		}
 		dst.SetUint(utmp)
 	case reflect.Float32, reflect.Float64:
+		if len(src) == 0 {
+			dst.SetFloat(0)
+			return nil
+		}
 		ftmp, err := strconv.ParseFloat(string(src), dst.Type().Bits())
 		if err != nil {
 			return err
 		}
 		dst.SetFloat(ftmp)
 	case reflect.Bool:
+		if len(src) == 0 {
+			dst.SetBool(false)
+			return nil
+		}
 		value, err := strconv.ParseBool(strings.TrimSpace(string(src)))
 		if err != nil {
 			return err

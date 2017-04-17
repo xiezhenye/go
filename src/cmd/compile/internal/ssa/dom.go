@@ -70,9 +70,9 @@ const nscratchslices = 7
 // in make.bash.
 const minscratchblocks = 512
 
-func (cfg *Config) scratchBlocksForDom(maxBlockID int) (a, b, c, d, e, f, g []ID) {
+func (cache *Cache) scratchBlocksForDom(maxBlockID int) (a, b, c, d, e, f, g []ID) {
 	tot := maxBlockID * nscratchslices
-	scratch := cfg.domblockstore
+	scratch := cache.domblockstore
 	if len(scratch) < tot {
 		// req = min(1.5*tot, nscratchslices*minscratchblocks)
 		// 50% padding allows for graph growth in later phases.
@@ -81,7 +81,7 @@ func (cfg *Config) scratchBlocksForDom(maxBlockID int) (a, b, c, d, e, f, g []ID
 			req = nscratchslices * minscratchblocks
 		}
 		scratch = make([]ID, req)
-		cfg.domblockstore = scratch
+		cache.domblockstore = scratch
 	} else {
 		// Clear as much of scratch as we will (re)use
 		scratch = scratch[0:tot]
@@ -117,7 +117,7 @@ func (f *Func) dominatorsLTOrig(entry *Block, predFn linkedBlocks, succFn linked
 	// Adapted directly from the original TOPLAS article's "simple" algorithm
 
 	maxBlockID := entry.Func.NumBlocks()
-	semi, vertex, label, parent, ancestor, bucketHead, bucketLink := f.Config.scratchBlocksForDom(maxBlockID)
+	semi, vertex, label, parent, ancestor, bucketHead, bucketLink := f.Cache.scratchBlocksForDom(maxBlockID)
 
 	// This version uses integers for most of the computation,
 	// to make the work arrays smaller and pointer-free.
@@ -247,7 +247,7 @@ func dominatorsSimple(f *Func) []*Block {
 	idom := make([]*Block, f.NumBlocks())
 
 	// Compute postorder walk
-	post := postorder(f)
+	post := f.postorder()
 
 	// Make map from block id to order index (for intersect call)
 	postnum := make([]int, f.NumBlocks())
@@ -296,7 +296,8 @@ func dominatorsSimple(f *Func) []*Block {
 // intersect finds the closest dominator of both b and c.
 // It requires a postorder numbering of all the blocks.
 func intersect(b, c *Block, postnum []int, idom []*Block) *Block {
-	// TODO: This loop is O(n^2). See BenchmarkNilCheckDeep*.
+	// TODO: This loop is O(n^2). It used to be used in nilcheck,
+	// see BenchmarkNilCheckDeep*.
 	for b != c {
 		if postnum[b.ID] < postnum[c.ID] {
 			b = idom[b.ID]
@@ -305,10 +306,4 @@ func intersect(b, c *Block, postnum []int, idom []*Block) *Block {
 		}
 	}
 	return b
-}
-
-// build immediate dominators.
-func domTree(f *Func) {
-	f.idom = dominators(f)
-	f.sdom = newSparseTree(f, f.idom)
 }

@@ -41,6 +41,13 @@ func checkShift(f *File, node ast.Node) {
 // checkLongShift checks if shift or shift-assign operations shift by more than
 // the length of the underlying variable.
 func checkLongShift(f *File, node ast.Node, x, y ast.Expr) {
+	if f.pkg.types[x].Value != nil {
+		// Ignore shifts of constants.
+		// These are frequently used for bit-twiddling tricks
+		// like ^uint(0) >> 63 for 32/64 bit detection and compatibility.
+		return
+	}
+
 	v := f.pkg.types[y].Value
 	if v == nil {
 		return
@@ -58,7 +65,6 @@ func checkLongShift(f *File, node ast.Node, x, y ast.Expr) {
 		return
 	}
 	var size int64
-	var msg string
 	switch b.Kind() {
 	case types.Uint8, types.Int8:
 		size = 8
@@ -68,15 +74,20 @@ func checkLongShift(f *File, node ast.Node, x, y ast.Expr) {
 		size = 32
 	case types.Uint64, types.Int64:
 		size = 64
-	case types.Int, types.Uint, types.Uintptr:
-		// These types may be as small as 32 bits, but no smaller.
-		size = 32
-		msg = "might be "
+	case types.Int, types.Uint:
+		size = uintBitSize
+	case types.Uintptr:
+		size = uintptrBitSize
 	default:
 		return
 	}
 	if amt >= size {
 		ident := f.gofmt(x)
-		f.Badf(node.Pos(), "%s %stoo small for shift of %d", ident, msg, amt)
+		f.Badf(node.Pos(), "%s (%d bits) too small for shift of %d", ident, size, amt)
 	}
 }
+
+var (
+	uintBitSize    = 8 * archSizes.Sizeof(types.Typ[types.Uint])
+	uintptrBitSize = 8 * archSizes.Sizeof(types.Typ[types.Uintptr])
+)

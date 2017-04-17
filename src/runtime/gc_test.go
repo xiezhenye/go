@@ -5,7 +5,7 @@
 package runtime_test
 
 import (
-	"io"
+	"fmt"
 	"os"
 	"reflect"
 	"runtime"
@@ -399,37 +399,6 @@ func TestPrintGC(t *testing.T) {
 	close(done)
 }
 
-// The implicit y, ok := x.(error) for the case error
-// in testTypeSwitch used to not initialize the result y
-// before passing &y to assertE2I2GC.
-// Catch this by making assertE2I2 call runtime.GC,
-// which will force a stack scan and failure if there are
-// bad pointers, and then fill the stack with bad pointers
-// and run the type switch.
-func TestAssertE2I2Liveness(t *testing.T) {
-	// Note that this flag is defined in export_test.go
-	// and is not available to ordinary imports of runtime.
-	*runtime.TestingAssertE2I2GC = true
-	defer func() {
-		*runtime.TestingAssertE2I2GC = false
-	}()
-
-	poisonStack()
-	testTypeSwitch(io.EOF)
-	poisonStack()
-	testAssert(io.EOF)
-	poisonStack()
-	testAssertVar(io.EOF)
-}
-
-func poisonStack() uintptr {
-	var x [1000]uintptr
-	for i := range x {
-		x[i] = 0xff
-	}
-	return x[123]
-}
-
 func testTypeSwitch(x interface{}) error {
 	switch y := x.(type) {
 	case nil:
@@ -453,16 +422,6 @@ func testAssertVar(x interface{}) error {
 		return y
 	}
 	return nil
-}
-
-func TestAssertE2T2Liveness(t *testing.T) {
-	*runtime.TestingAssertE2T2GC = true
-	defer func() {
-		*runtime.TestingAssertE2T2GC = false
-	}()
-
-	poisonStack()
-	testIfaceEqual(io.EOF)
 }
 
 var a bool
@@ -489,4 +448,54 @@ func TestPageAccounting(t *testing.T) {
 	if pagesInUse != counted {
 		t.Fatalf("mheap_.pagesInUse is %d, but direct count is %d", pagesInUse, counted)
 	}
+}
+
+func TestReadMemStats(t *testing.T) {
+	base, slow := runtime.ReadMemStatsSlow()
+	if base != slow {
+		logDiff(t, "MemStats", reflect.ValueOf(base), reflect.ValueOf(slow))
+		t.Fatal("memstats mismatch")
+	}
+}
+
+func logDiff(t *testing.T, prefix string, got, want reflect.Value) {
+	typ := got.Type()
+	switch typ.Kind() {
+	case reflect.Array, reflect.Slice:
+		if got.Len() != want.Len() {
+			t.Logf("len(%s): got %v, want %v", prefix, got, want)
+			return
+		}
+		for i := 0; i < got.Len(); i++ {
+			logDiff(t, fmt.Sprintf("%s[%d]", prefix, i), got.Index(i), want.Index(i))
+		}
+	case reflect.Struct:
+		for i := 0; i < typ.NumField(); i++ {
+			gf, wf := got.Field(i), want.Field(i)
+			logDiff(t, prefix+"."+typ.Field(i).Name, gf, wf)
+		}
+	case reflect.Map:
+		t.Fatal("not implemented: logDiff for map")
+	default:
+		if got.Interface() != want.Interface() {
+			t.Logf("%s: got %v, want %v", prefix, got, want)
+		}
+	}
+}
+
+func BenchmarkReadMemStats(b *testing.B) {
+	var ms runtime.MemStats
+	const heapSize = 100 << 20
+	x := make([]*[1024]byte, heapSize/1024)
+	for i := range x {
+		x[i] = new([1024]byte)
+	}
+	hugeSink = x
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		runtime.ReadMemStats(&ms)
+	}
+
+	hugeSink = nil
 }

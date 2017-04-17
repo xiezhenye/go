@@ -4,7 +4,10 @@
 
 package ssa
 
-import "fmt"
+import (
+	"cmd/internal/src"
+	"fmt"
+)
 
 // Block represents a basic block in the control flow graph of a function.
 type Block struct {
@@ -12,8 +15,8 @@ type Block struct {
 	// these IDs densely, but no guarantees.
 	ID ID
 
-	// Line number for block's control operation
-	Line int32
+	// Source position for block's control operation
+	Pos src.XPos
 
 	// The kind of block this is.
 	Kind BlockKind
@@ -89,13 +92,16 @@ type Edge struct {
 func (e Edge) Block() *Block {
 	return e.b
 }
+func (e Edge) Index() int {
+	return e.i
+}
 
 //     kind           control    successors
 //   ------------------------------------------
 //     Exit        return mem                []
 //    Plain               nil            [next]
 //       If   a boolean Value      [then, else]
-//     Call               mem  [nopanic, panic]  (control opcode should be OpCall or OpStaticCall)
+//    Defer               mem  [nopanic, panic]  (control opcode should be OpStaticCall to runtime.deferproc)
 type BlockKind int8
 
 // short form print
@@ -144,6 +150,7 @@ func (b *Block) AddEdgeTo(c *Block) {
 	j := len(c.Preds)
 	b.Succs = append(b.Succs, Edge{c, j})
 	c.Preds = append(c.Preds, Edge{b, i})
+	b.Func.invalidateCFG()
 }
 
 // removePred removes the ith input edge from b.
@@ -159,6 +166,7 @@ func (b *Block) removePred(i int) {
 	}
 	b.Preds[n] = Edge{}
 	b.Preds = b.Preds[:n]
+	b.Func.invalidateCFG()
 }
 
 // removeSucc removes the ith output edge from b.
@@ -174,6 +182,7 @@ func (b *Block) removeSucc(i int) {
 	}
 	b.Succs[n] = Edge{}
 	b.Succs = b.Succs[:n]
+	b.Func.invalidateCFG()
 }
 
 func (b *Block) swapSuccessors() {
@@ -189,10 +198,9 @@ func (b *Block) swapSuccessors() {
 	b.Likely *= -1
 }
 
-func (b *Block) Logf(msg string, args ...interface{})           { b.Func.Logf(msg, args...) }
-func (b *Block) Log() bool                                      { return b.Func.Log() }
-func (b *Block) Fatalf(msg string, args ...interface{})         { b.Func.Fatalf(msg, args...) }
-func (b *Block) Unimplementedf(msg string, args ...interface{}) { b.Func.Unimplementedf(msg, args...) }
+func (b *Block) Logf(msg string, args ...interface{})   { b.Func.Logf(msg, args...) }
+func (b *Block) Log() bool                              { return b.Func.Log() }
+func (b *Block) Fatalf(msg string, args ...interface{}) { b.Func.Fatalf(msg, args...) }
 
 type BranchPrediction int8
 

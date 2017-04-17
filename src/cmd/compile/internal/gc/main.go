@@ -8,8 +8,11 @@ package gc
 
 import (
 	"bufio"
+	"bytes"
 	"cmd/compile/internal/ssa"
+	"cmd/compile/internal/types"
 	"cmd/internal/obj"
+	"cmd/internal/src"
 	"cmd/internal/sys"
 	"flag"
 	"fmt"
@@ -25,31 +28,34 @@ import (
 var imported_unsafe bool
 
 var (
-	goos    string
-	goarch  string
-	goroot  string
 	buildid string
 )
 
 var (
-	Debug_append  int
-	Debug_closure int
-	Debug_panic   int
-	Debug_slice   int
-	Debug_wb      int
+	Debug_append   int
+	Debug_asm      bool
+	Debug_closure  int
+	debug_dclstack int
+	Debug_panic    int
+	Debug_slice    int
+	Debug_vlog     bool
+	Debug_wb       int
+	Debug_pctab    string
 )
 
 // Debug arguments.
 // These can be specified with the -d flag, as in "-d nil"
-// to set the debug_checknil variable. In general the list passed
-// to -d can be comma-separated.
+// to set the debug_checknil variable.
+// Multiple options can be comma-separated.
+// Each option accepts an optional argument, as in "gcprog=2"
 var debugtab = []struct {
 	name string
-	val  *int
+	val  interface{} // must be *int or *string
 }{
 	{"append", &Debug_append},         // print information about append compilation
 	{"closure", &Debug_closure},       // print information about closure compilation
-	{"disablenil", &Disable_checknil}, // disable nil checks
+	{"disablenil", &disable_checknil}, // disable nil checks
+	{"dclstack", &debug_dclstack},     // run internal dclstack checks
 	{"gcprog", &Debug_gcprog},         // print dump of GC programs
 	{"nil", &Debug_checknil},          // print information about nil checks
 	{"panic", &Debug_panic},           // do not hide any compiler panic
@@ -57,6 +63,7 @@ var debugtab = []struct {
 	{"typeassert", &Debug_typeassert}, // print information about type assertion inlining
 	{"wb", &Debug_wb},                 // print information about write barriers
 	{"export", &Debug_export},         // print export data
+	{"pctab", &Debug_pctab},           // print named pc-value table
 }
 
 func usage() {
@@ -86,7 +93,7 @@ func doversion() {
 	if p != "" {
 		sep = " "
 	}
-	fmt.Printf("compile version %s%s%s\n", obj.Getgoversion(), sep, p)
+	fmt.Printf("compile version %s%s%s\n", obj.Version, sep, p)
 	os.Exit(0)
 }
 
@@ -96,15 +103,23 @@ func supportsDynlink(arch *sys.Arch) bool {
 	return arch.InFamily(sys.AMD64, sys.ARM, sys.ARM64, sys.I386, sys.PPC64, sys.S390X)
 }
 
-func Main() {
+// timing data for compiler phases
+var timings Timings
+var benchfile string
+
+// Main parses flags and Go source files specified in the command-line
+// arguments, type-checks the parsed Go package, compiles functions to machine
+// code, and finally writes the compiled package definition to disk.
+func Main(archInit func(*Arch)) {
+	timings.Start("fe", "init")
+
 	defer hidePanic()
 
-	goarch = obj.Getgoarch()
+	archInit(&thearch)
 
-	Ctxt = obj.Linknew(Thearch.LinkArch)
-	Ctxt.DiagFunc = Yyerror
-	bstdout = bufio.NewWriter(os.Stdout)
-	Ctxt.Bso = bstdout
+	Ctxt = obj.Linknew(thearch.LinkArch)
+	Ctxt.DiagFunc = yyerror
+	Ctxt.Bso = bufio.NewWriter(os.Stdout)
 
 	localpkg = mkpkg("")
 	localpkg.Prefix = "\"\""
@@ -117,9 +132,14 @@ func Main() {
 	unsafepkg = mkpkg("unsafe")
 	unsafepkg.Name = "unsafe"
 
-	// real package, referred to by generated runtime calls
-	Runtimepkg = mkpkg("runtime")
+	// Pseudo-package that contains the compiler's builtin
+	// declarations for package runtime. These are declared in a
+	// separate package to avoid conflicts with package runtime's
+	// actual declarations, which may differ intentionally but
+	// insignificantly.
+	Runtimepkg = mkpkg("go.runtime")
 	Runtimepkg.Name = "runtime"
+	Runtimepkg.Prefix = "runtime"
 
 	// pseudo-packages used in symbol tables
 	itabpkg = mkpkg("go.itab")
@@ -142,36 +162,27 @@ func Main() {
 	mappkg.Name = "go.map"
 	mappkg.Prefix = "go.map"
 
-	goroot = obj.Getgoroot()
-	goos = obj.Getgoos()
-
-	Nacl = goos == "nacl"
-	if Nacl {
-		flag_largemodel = true
-	}
+	Nacl = obj.GOOS == "nacl"
 
 	flag.BoolVar(&compiling_runtime, "+", false, "compiling runtime")
 	obj.Flagcount("%", "debug non-static initializers", &Debug['%'])
-	obj.Flagcount("A", "for bootstrapping, allow 'any' type", &Debug['A'])
 	obj.Flagcount("B", "disable bounds checking", &Debug['B'])
+	obj.Flagcount("C", "disable printing of columns in error messages", &Debug['C']) // TODO(gri) remove eventually
 	flag.StringVar(&localimport, "D", "", "set relative `path` for local imports")
 	obj.Flagcount("E", "debug symbol export", &Debug['E'])
 	obj.Flagfn1("I", "add `directory` to import search path", addidir)
 	obj.Flagcount("K", "debug missing line numbers", &Debug['K'])
-	obj.Flagcount("M", "debug move generation", &Debug['M'])
 	obj.Flagcount("N", "disable optimizations", &Debug['N'])
-	obj.Flagcount("P", "debug peephole optimizer", &Debug['P'])
-	obj.Flagcount("R", "debug register optimizer", &Debug['R'])
-	obj.Flagcount("S", "print assembly listing", &Debug['S'])
+	flag.BoolVar(&Debug_asm, "S", false, "print assembly listing")
 	obj.Flagfn0("V", "print compiler version", doversion)
 	obj.Flagcount("W", "debug parse tree after type checking", &Debug['W'])
 	flag.StringVar(&asmhdr, "asmhdr", "", "write assembly header to `file`")
 	flag.StringVar(&buildid, "buildid", "", "record `id` as the build id in the export metadata")
 	flag.BoolVar(&pure_go, "complete", false, "compiling complete package (no C or assembly)")
 	flag.StringVar(&debugstr, "d", "", "print debug information about items in `list`")
+	flag.BoolVar(&flagDWARF, "dwarf", true, "generate DWARF symbols")
 	obj.Flagcount("e", "no limit on number of errors reported", &Debug['e'])
 	obj.Flagcount("f", "debug stack frames", &Debug['f'])
-	obj.Flagcount("g", "debug code generation", &Debug['g'])
 	obj.Flagcount("h", "halt on error", &Debug['h'])
 	obj.Flagcount("i", "debug line number stack", &Debug['i'])
 	obj.Flagfn1("importmap", "add `definition` of the form source=actual to import map", addImportMap)
@@ -182,7 +193,7 @@ func Main() {
 	obj.Flagcount("live", "debug liveness analysis", &debuglive)
 	obj.Flagcount("m", "print optimization decisions", &Debug['m'])
 	flag.BoolVar(&flag_msan, "msan", false, "build code compatible with C/C++ memory sanitizer")
-	flag.BoolVar(&newexport, "newexport", true, "use new export format") // TODO(gri) remove eventually (issue 15323)
+	flag.BoolVar(&dolinkobj, "dolinkobj", true, "generate linker-specific objects; if false, some invalid code may compile")
 	flag.BoolVar(&nolocalimports, "nolocalimports", false, "reject local (relative) imports")
 	flag.StringVar(&outfile, "o", "", "write output to `file`")
 	flag.StringVar(&myimportpath, "p", "", "set expected package import `path`")
@@ -190,36 +201,60 @@ func Main() {
 	obj.Flagcount("r", "debug generated wrappers", &Debug['r'])
 	flag.BoolVar(&flag_race, "race", false, "enable race detector")
 	obj.Flagcount("s", "warn about composite literals that can be simplified", &Debug['s'])
-	flag.StringVar(&Ctxt.LineHist.TrimPathPrefix, "trimpath", "", "remove `prefix` from recorded source file paths")
+	flag.StringVar(&pathPrefix, "trimpath", "", "remove `prefix` from recorded source file paths")
 	flag.BoolVar(&safemode, "u", false, "reject unsafe code")
-	obj.Flagcount("v", "increase debug verbosity", &Debug['v'])
+	flag.BoolVar(&Debug_vlog, "v", false, "increase debug verbosity")
 	obj.Flagcount("w", "debug type checking", &Debug['w'])
 	flag.BoolVar(&use_writebarrier, "wb", true, "enable write barrier")
-	obj.Flagcount("x", "debug lexer", &Debug['x'])
 	var flag_shared bool
 	var flag_dynlink bool
-	if supportsDynlink(Thearch.LinkArch.Arch) {
+	if supportsDynlink(thearch.LinkArch.Arch) {
 		flag.BoolVar(&flag_shared, "shared", false, "generate code that can be linked into a shared library")
 		flag.BoolVar(&flag_dynlink, "dynlink", false, "support references to Go symbols defined in other shared libraries")
-	}
-	if Thearch.LinkArch.Family == sys.AMD64 {
-		flag.BoolVar(&flag_largemodel, "largemodel", false, "generate code that assumes a large memory model")
 	}
 	flag.StringVar(&cpuprofile, "cpuprofile", "", "write cpu profile to `file`")
 	flag.StringVar(&memprofile, "memprofile", "", "write memory profile to `file`")
 	flag.Int64Var(&memprofilerate, "memprofilerate", 0, "set runtime.MemProfileRate to `rate`")
-	flag.BoolVar(&ssaEnabled, "ssa", true, "use SSA backend to generate code")
+	flag.StringVar(&traceprofile, "traceprofile", "", "write an execution trace to `file`")
+	flag.StringVar(&blockprofile, "blockprofile", "", "write block profile to `file`")
+	flag.StringVar(&mutexprofile, "mutexprofile", "", "write mutex profile to `file`")
+	flag.StringVar(&benchfile, "bench", "", "append benchmark times to `file`")
 	obj.Flagparse(usage)
 
 	Ctxt.Flag_shared = flag_dynlink || flag_shared
 	Ctxt.Flag_dynlink = flag_dynlink
 	Ctxt.Flag_optimize = Debug['N'] == 0
 
-	Ctxt.Debugasm = int32(Debug['S'])
-	Ctxt.Debugvlog = int32(Debug['v'])
+	Ctxt.Debugasm = Debug_asm
+	Ctxt.Debugvlog = Debug_vlog
+	if flagDWARF {
+		Ctxt.DebugInfo = debuginfo
+	}
 
 	if flag.NArg() < 1 {
 		usage()
+	}
+
+	thearch.LinkArch.Init(Ctxt)
+
+	if outfile == "" {
+		p := flag.Arg(0)
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			p = p[i+1:]
+		}
+		if runtime.GOOS == "windows" {
+			if i := strings.LastIndex(p, `\`); i >= 0 {
+				p = p[i+1:]
+			}
+		}
+		if i := strings.LastIndex(p, "."); i >= 0 {
+			p = p[:i]
+		}
+		suffix := ".o"
+		if writearchive {
+			suffix = ".a"
+		}
+		outfile = p + suffix
 	}
 
 	startProfile()
@@ -237,6 +272,9 @@ func Main() {
 	} else if flag_race || flag_msan {
 		instrumenting = true
 	}
+	if compiling_runtime && Debug['N'] != 0 {
+		log.Fatal("cannot disable optimizations while compiling runtime")
+	}
 
 	// parse -d argument
 	if debugstr != "" {
@@ -245,22 +283,33 @@ func Main() {
 			if name == "" {
 				continue
 			}
-			val := 1
-			if i := strings.Index(name, "="); i >= 0 {
+			val, valstring, haveInt := 1, "", true
+			if i := strings.IndexAny(name, "=:"); i >= 0 {
 				var err error
-				val, err = strconv.Atoi(name[i+1:])
+				name, valstring = name[:i], name[i+1:]
+				val, err = strconv.Atoi(valstring)
 				if err != nil {
-					log.Fatalf("invalid debug value %v", name)
+					val, haveInt = 1, false
 				}
-				name = name[:i]
 			}
 			for _, t := range debugtab {
-				if t.name == name {
-					if t.val != nil {
-						*t.val = val
-						continue Split
-					}
+				if t.name != name {
+					continue
 				}
+				switch vp := t.val.(type) {
+				case nil:
+					// Ignore
+				case *string:
+					*vp = valstring
+				case *int:
+					if !haveInt {
+						log.Fatalf("invalid debug value %v", name)
+					}
+					*vp = val
+				default:
+					panic("bad debugtab type")
+				}
+				continue Split
 			}
 			// special case for ssa for now
 			if strings.HasPrefix(name, "ssa/") {
@@ -273,7 +322,7 @@ func Main() {
 					flag = phase[i+1:]
 					phase = phase[:i]
 				}
-				err := ssa.PhaseOption(phase, flag, val)
+				err := ssa.PhaseOption(phase, flag, val, valstring)
 				if err != "" {
 					log.Fatalf(err)
 				}
@@ -283,6 +332,9 @@ func Main() {
 		}
 	}
 
+	// set via a -d flag
+	Ctxt.Debugpcln = Debug_pctab
+
 	// enable inlining.  for now:
 	//	default: inlining on.  (debug['l'] == 1)
 	//	-l: inlining off  (debug['l'] == 0)
@@ -291,60 +343,53 @@ func Main() {
 		Debug['l'] = 1 - Debug['l']
 	}
 
-	Thearch.Betypeinit()
-	Widthint = Thearch.LinkArch.IntSize
-	Widthptr = Thearch.LinkArch.PtrSize
-	Widthreg = Thearch.LinkArch.RegSize
+	Widthint = thearch.LinkArch.IntSize
+	Widthptr = thearch.LinkArch.PtrSize
+	Widthreg = thearch.LinkArch.RegSize
+
+	// initialize types package
+	// (we need to do this to break dependencies that otherwise
+	// would lead to import cycles)
+	types.Widthptr = Widthptr
+	types.Dowidth = dowidth
+	types.Fatalf = Fatalf
+	types.Sconv = func(s *types.Sym, flag, mode int) string {
+		return sconv(s, FmtFlag(flag), fmtMode(mode))
+	}
+	types.Tconv = func(t *types.Type, flag, mode, depth int) string {
+		return tconv(t, FmtFlag(flag), fmtMode(mode), depth)
+	}
+	types.FormatSym = func(sym *types.Sym, s fmt.State, verb rune, mode int) {
+		symFormat(sym, s, verb, fmtMode(mode))
+	}
+	types.FormatType = func(t *types.Type, s fmt.State, verb rune, mode int) {
+		typeFormat(t, s, verb, fmtMode(mode))
+	}
+	types.FieldName = func(f *types.Field) string {
+		return f.Sym.Name
+	}
+	types.TypeLinkSym = func(t *types.Type) *obj.LSym {
+		return Linksym(typenamesym(t))
+	}
+	types.FmtLeft = int(FmtLeft)
+	types.FmtUnsigned = int(FmtUnsigned)
+	types.FErr = FErr
 
 	initUniverse()
 
-	blockgen = 1
 	dclcontext = PEXTERN
 	nerrors = 0
-	lexlineno = 1
 
+	autogeneratedPos = makePos(src.NewFileBase("<autogenerated>", "<autogenerated>"), 1, 0)
+
+	timings.Start("fe", "loadsys")
 	loadsys()
 
-	for _, infile = range flag.Args() {
-		if trace && Debug['x'] != 0 {
-			fmt.Printf("--- %s ---\n", infile)
-		}
+	timings.Start("fe", "parse")
+	lines := parseFiles(flag.Args())
+	timings.Stop()
+	timings.AddEvent(int64(lines), "lines")
 
-		linehistpush(infile)
-
-		f, err := os.Open(infile)
-		if err != nil {
-			fmt.Printf("open %s: %v\n", infile, err)
-			errorexit()
-		}
-		bin := bufio.NewReader(f)
-
-		// Skip initial BOM if present.
-		if r, _, _ := bin.ReadRune(); r != BOM {
-			bin.UnreadRune()
-		}
-
-		block = 1
-		iota_ = -1000000
-
-		imported_unsafe = false
-
-		parse_file(bin)
-		if nsyntaxerrors != 0 {
-			errorexit()
-		}
-
-		// Instead of converting EOF into '\n' in getc and count it as an extra line
-		// for the line history to work, and which then has to be corrected elsewhere,
-		// just add a line here.
-		lexlineno++
-
-		linehistpop()
-		f.Close()
-	}
-
-	testdclstack()
-	mkpackage(localpkg.Name) // final import not used checks
 	finishUniverse()
 
 	typecheckok = true
@@ -357,12 +402,16 @@ func Main() {
 	// Phase 1: const, type, and names and types of funcs.
 	//   This will gather all the information about types
 	//   and methods but doesn't depend on any of it.
+	//   We also defer type alias declarations until phase 2
+	//   to avoid cycles like #18640.
 	defercheckwidth()
 
 	// Don't use range--typecheck can add closures to xtop.
+	timings.Start("fe", "typecheck", "top1")
 	for i := 0; i < len(xtop); i++ {
-		if xtop[i].Op != ODCL && xtop[i].Op != OAS && xtop[i].Op != OAS2 {
-			xtop[i] = typecheck(xtop[i], Etop)
+		n := xtop[i]
+		if op := n.Op; op != ODCL && op != OAS && op != OAS2 && (op != ODCLTYPE || !n.Left.Name.Param.Alias) {
+			xtop[i] = typecheck(n, Etop)
 		}
 	}
 
@@ -370,18 +419,23 @@ func Main() {
 	//   To check interface assignments, depends on phase 1.
 
 	// Don't use range--typecheck can add closures to xtop.
+	timings.Start("fe", "typecheck", "top2")
 	for i := 0; i < len(xtop); i++ {
-		if xtop[i].Op == ODCL || xtop[i].Op == OAS || xtop[i].Op == OAS2 {
-			xtop[i] = typecheck(xtop[i], Etop)
+		n := xtop[i]
+		if op := n.Op; op == ODCL || op == OAS || op == OAS2 || op == ODCLTYPE && n.Left.Name.Param.Alias {
+			xtop[i] = typecheck(n, Etop)
 		}
 	}
 	resumecheckwidth()
 
 	// Phase 3: Type check function bodies.
 	// Don't use range--typecheck can add closures to xtop.
+	timings.Start("fe", "typecheck", "func")
+	var fcount int64
 	for i := 0; i < len(xtop); i++ {
-		if xtop[i].Op == ODCLFUNC || xtop[i].Op == OCLOSURE {
-			Curfn = xtop[i]
+		n := xtop[i]
+		if op := n.Op; op == ODCLFUNC || op == OCLOSURE {
+			Curfn = n
 			decldepth = 1
 			saveerrors()
 			typecheckslice(Curfn.Nbody.Slice(), Etop)
@@ -389,12 +443,15 @@ func Main() {
 			if nerrors != 0 {
 				Curfn.Nbody.Set(nil) // type errors; do not compile
 			}
+			fcount++
 		}
 	}
+	timings.AddEvent(fcount, "funcs")
 
 	// Phase 4: Decide how to capture closed variables.
 	// This needs to run before escape analysis,
 	// because variables captured by value do not escape.
+	timings.Start("fe", "capturevars")
 	for _, n := range xtop {
 		if n.Op == ODCLFUNC && n.Func.Closure != nil {
 			Curfn = n
@@ -409,6 +466,7 @@ func Main() {
 	}
 
 	// Phase 5: Inlining
+	timings.Start("fe", "inlining")
 	if Debug['l'] > 1 {
 		// Typecheck imported function bodies if debug['l'] > 1,
 		// otherwise lazily when used or re-exported.
@@ -428,10 +486,14 @@ func Main() {
 		// Find functions that can be inlined and clone them before walk expands them.
 		visitBottomUp(xtop, func(list []*Node, recursive bool) {
 			for _, n := range list {
-				if n.Op == ODCLFUNC {
+				if !recursive {
 					caninl(n)
-					inlcalls(n)
+				} else {
+					if Debug['m'] > 1 {
+						fmt.Printf("%v: cannot inline %v: recursive\n", n.Line(), n.Func.Nname)
+					}
 				}
+				inlcalls(n)
 			}
 		})
 	}
@@ -444,37 +506,59 @@ func Main() {
 	// or else the stack copier will not update it.
 	// Large values are also moved off stack in escape analysis;
 	// because large values may contain pointers, it must happen early.
+	timings.Start("fe", "escapes")
 	escapes(xtop)
 
-	// Phase 7: Transform closure bodies to properly reference captured variables.
-	// This needs to happen before walk, because closures must be transformed
-	// before walk reaches a call of a closure.
-	for _, n := range xtop {
-		if n.Op == ODCLFUNC && n.Func.Closure != nil {
-			Curfn = n
-			transformclosure(n)
+	if dolinkobj {
+		// Phase 7: Transform closure bodies to properly reference captured variables.
+		// This needs to happen before walk, because closures must be transformed
+		// before walk reaches a call of a closure.
+		timings.Start("fe", "xclosures")
+		for _, n := range xtop {
+			if n.Op == ODCLFUNC && n.Func.Closure != nil {
+				Curfn = n
+				transformclosure(n)
+			}
 		}
-	}
 
-	Curfn = nil
+		// Prepare for SSA compilation.
+		// This must be before peekitabs, because peekitabs
+		// can trigger function compilation.
+		initssaconfig()
 
-	// Phase 8: Compile top level functions.
-	// Don't use range--walk can add functions to xtop.
-	for i := 0; i < len(xtop); i++ {
-		if xtop[i].Op == ODCLFUNC {
-			funccompile(xtop[i])
+		// Just before compilation, compile itabs found on
+		// the right side of OCONVIFACE so that methods
+		// can be de-virtualized during compilation.
+		Curfn = nil
+		peekitabs()
+
+		// Phase 8: Compile top level functions.
+		// Don't use range--walk can add functions to xtop.
+		timings.Start("be", "compilefuncs")
+		fcount = 0
+		for i := 0; i < len(xtop); i++ {
+			n := xtop[i]
+			if n.Op == ODCLFUNC {
+				funccompile(n)
+				fcount++
+			}
 		}
-	}
+		timings.AddEvent(fcount, "funcs")
 
-	if nsavederrors+nerrors == 0 {
-		fninit(xtop)
-	}
+		if nsavederrors+nerrors == 0 {
+			fninit(xtop)
+		}
 
-	if compiling_runtime {
-		checknowritebarrierrec()
+		if compiling_runtime {
+			checknowritebarrierrec()
+		}
+		for _, largePos := range largeStackFrames {
+			yyerrorl(largePos, "stack frame too large (>2GB)")
+		}
 	}
 
 	// Phase 9: Check external declarations.
+	timings.Start("be", "externaldcls")
 	for i, n := range externdcl {
 		if n.Op == ONAME {
 			externdcl[i] = typecheck(externdcl[i], Erv)
@@ -485,8 +569,9 @@ func Main() {
 		errorexit()
 	}
 
+	// Write object data to disk.
+	timings.Start("be", "dumpobj")
 	dumpobj()
-
 	if asmhdr != "" {
 		dumpasmhdr()
 	}
@@ -495,7 +580,37 @@ func Main() {
 		errorexit()
 	}
 
-	Flusherrors()
+	flusherrors()
+	timings.Stop()
+
+	if benchfile != "" {
+		if err := writebench(benchfile); err != nil {
+			log.Fatalf("cannot write benchmark data: %v", err)
+		}
+	}
+}
+
+func writebench(filename string) error {
+	f, err := os.OpenFile(filename, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	fmt.Fprintln(&buf, "commit:", obj.Version)
+	fmt.Fprintln(&buf, "goos:", runtime.GOOS)
+	fmt.Fprintln(&buf, "goarch:", runtime.GOARCH)
+	timings.Write(&buf, "BenchmarkCompile:"+myimportpath+":")
+
+	n, err := f.Write(buf.Bytes())
+	if err != nil {
+		return err
+	}
+	if n != buf.Len() {
+		panic("bad writer")
+	}
+
+	return f.Close()
 }
 
 var importMap = map[string]string{}
@@ -590,7 +705,7 @@ func findpkg(name string) (file string, ok bool) {
 	// don't want to see "encoding/../encoding/base64"
 	// as different from "encoding/base64".
 	if q := path.Clean(name); q != name {
-		Yyerror("non-canonical import path %q (should be %q)", name, q)
+		yyerror("non-canonical import path %q (should be %q)", name, q)
 		return "", false
 	}
 
@@ -605,7 +720,7 @@ func findpkg(name string) (file string, ok bool) {
 		}
 	}
 
-	if goroot != "" {
+	if obj.GOROOT != "" {
 		suffix := ""
 		suffixsep := ""
 		if flag_installsuffix != "" {
@@ -619,11 +734,11 @@ func findpkg(name string) (file string, ok bool) {
 			suffix = "msan"
 		}
 
-		file = fmt.Sprintf("%s/pkg/%s_%s%s%s/%s.a", goroot, goos, goarch, suffixsep, suffix, name)
+		file = fmt.Sprintf("%s/pkg/%s_%s%s%s/%s.a", obj.GOROOT, obj.GOOS, obj.GOARCH, suffixsep, suffix, name)
 		if _, err := os.Stat(file); err == nil {
 			return file, true
 		}
-		file = fmt.Sprintf("%s/pkg/%s_%s%s%s/%s.o", goroot, goos, goarch, suffixsep, suffix, name)
+		file = fmt.Sprintf("%s/pkg/%s_%s%s%s/%s.o", obj.GOROOT, obj.GOOS, obj.GOARCH, suffixsep, suffix, name)
 		if _, err := os.Stat(file); err == nil {
 			return file, true
 		}
@@ -632,59 +747,52 @@ func findpkg(name string) (file string, ok bool) {
 	return "", false
 }
 
-// loadsys loads the definitions for the low-level runtime and unsafe functions,
+// loadsys loads the definitions for the low-level runtime functions,
 // so that the compiler can generate calls to them,
-// but does not make the names "runtime" or "unsafe" visible as packages.
+// but does not make them visible to user code.
 func loadsys() {
-	if Debug['A'] != 0 {
-		return
+	types.Block = 1
+
+	inimport = true
+	typecheckok = true
+	defercheckwidth()
+
+	typs := runtimeTypes()
+	for _, d := range runtimeDecls {
+		sym := Runtimepkg.Lookup(d.name)
+		typ := typs[d.typ]
+		switch d.tag {
+		case funcTag:
+			importsym(Runtimepkg, sym, ONAME)
+			n := newfuncname(sym)
+			n.Type = typ
+			declare(n, PFUNC)
+		case varTag:
+			importvar(Runtimepkg, sym, typ)
+		default:
+			Fatalf("unhandled declaration tag %v", d.tag)
+		}
 	}
 
-	block = 1
-	iota_ = -1000000
-	incannedimport = 1
-
-	// The first byte in the binary export format is a 'c' or 'd'
-	// specifying the encoding format. We could just check that
-	// byte, but this is a perhaps more robust. Also, it is not
-	// speed-critical.
-	// TODO(gri) simplify once textual export format has gone
-	if strings.HasPrefix(runtimeimport, "package") {
-		// textual export format
-		importpkg = Runtimepkg
-		parse_import(bufio.NewReader(strings.NewReader(runtimeimport)), nil)
-		importpkg = unsafepkg
-		parse_import(bufio.NewReader(strings.NewReader(unsafeimport)), nil)
-	} else {
-		// binary export format
-		importpkg = Runtimepkg
-		Import(bufio.NewReader(strings.NewReader(runtimeimport)))
-		importpkg = unsafepkg
-		Import(bufio.NewReader(strings.NewReader(unsafeimport)))
-	}
-
-	importpkg = nil
-	incannedimport = 0
+	typecheckok = false
+	resumecheckwidth()
+	inimport = false
 }
 
-func importfile(f *Val, indent []byte) {
-	if importpkg != nil {
-		Fatalf("importpkg not nil")
-	}
-
+func importfile(f *Val) *types.Pkg {
 	path_, ok := f.U.(string)
 	if !ok {
-		Yyerror("import statement not a string")
-		return
+		yyerror("import path must be a string")
+		return nil
 	}
 
 	if len(path_) == 0 {
-		Yyerror("import path is empty")
-		return
+		yyerror("import path is empty")
+		return nil
 	}
 
 	if isbadimport(path_) {
-		return
+		return nil
 	}
 
 	// The package name main is no longer reserved,
@@ -692,12 +800,12 @@ func importfile(f *Val, indent []byte) {
 	// the main package, just as we reserve the import
 	// path "math" to identify the standard math package.
 	if path_ == "main" {
-		Yyerror("cannot import \"main\"")
+		yyerror("cannot import \"main\"")
 		errorexit()
 	}
 
 	if myimportpath != "" && path_ == myimportpath {
-		Yyerror("import %q while compiling that package (import cycle)", path_)
+		yyerror("import %q while compiling that package (import cycle)", path_)
 		errorexit()
 	}
 
@@ -707,19 +815,18 @@ func importfile(f *Val, indent []byte) {
 
 	if path_ == "unsafe" {
 		if safemode {
-			Yyerror("cannot import package unsafe")
+			yyerror("cannot import package unsafe")
 			errorexit()
 		}
 
-		importpkg = unsafepkg
 		imported_unsafe = true
-		return
+		return unsafepkg
 	}
 
 	if islocalname(path_) {
 		if path_[0] == '/' {
-			Yyerror("import path cannot be absolute path")
-			return
+			yyerror("import path cannot be absolute path")
+			return nil
 		}
 
 		prefix := Ctxt.Pathname
@@ -729,35 +836,35 @@ func importfile(f *Val, indent []byte) {
 		path_ = path.Join(prefix, path_)
 
 		if isbadimport(path_) {
-			return
+			return nil
 		}
 	}
 
 	file, found := findpkg(path_)
 	if !found {
-		Yyerror("can't find import: %q", path_)
+		yyerror("can't find import: %q", path_)
 		errorexit()
 	}
 
-	importpkg = mkpkg(path_)
-
+	importpkg := mkpkg(path_)
 	if importpkg.Imported {
-		return
+		return importpkg
 	}
 
 	importpkg.Imported = true
 
 	impf, err := os.Open(file)
 	if err != nil {
-		Yyerror("can't open import: %q: %v", path_, err)
+		yyerror("can't open import: %q: %v", path_, err)
 		errorexit()
 	}
 	defer impf.Close()
 	imp := bufio.NewReader(impf)
 
-	if strings.HasSuffix(file, ".a") {
+	const pkgSuffix = ".a"
+	if strings.HasSuffix(file, pkgSuffix) {
 		if !skiptopkgdef(imp) {
-			Yyerror("import %s: not a package file", file)
+			yyerror("import %s: not a package file", file)
 			errorexit()
 		}
 	}
@@ -773,18 +880,19 @@ func importfile(f *Val, indent []byte) {
 
 	if p != "empty archive" {
 		if !strings.HasPrefix(p, "go object ") {
-			Yyerror("import %s: not a go object file: %s", file, p)
+			yyerror("import %s: not a go object file: %s", file, p)
 			errorexit()
 		}
 
-		q := fmt.Sprintf("%s %s %s %s", obj.Getgoos(), obj.Getgoarch(), obj.Getgoversion(), obj.Expstring())
+		q := fmt.Sprintf("%s %s %s %s", obj.GOOS, obj.GOARCH, obj.Version, obj.Expstring())
 		if p[10:] != q {
-			Yyerror("import %s: object is [%s] expected [%s]", file, p[10:], q)
+			yyerror("import %s: object is [%s] expected [%s]", file, p[10:], q)
 			errorexit()
 		}
 	}
 
 	// process header lines
+	safe := false
 	for {
 		p, err = imp.ReadString('\n')
 		if err != nil {
@@ -794,18 +902,21 @@ func importfile(f *Val, indent []byte) {
 			break // header ends with blank line
 		}
 		if strings.HasPrefix(p, "safe") {
-			importpkg.Safe = true
+			safe = true
 			break // ok to ignore rest
 		}
 	}
+	if safemode && !safe {
+		yyerror("cannot import unsafe package %q", importpkg.Path)
+	}
 
-	// assume files move (get installed)
-	// so don't record the full path.
-	linehistpragma(file[len(file)-len(path_)-2:]) // acts as #pragma lib
+	// assume files move (get installed) so don't record the full path
+	// (e.g., for file "/Users/foo/go/pkg/darwin_amd64/math.a" record "math.a")
+	Ctxt.AddImport(file[len(file)-len(path_)-len(pkgSuffix):])
 
 	// In the importfile, if we find:
-	// $$\n  (old format): position the input right after $$\n and return
-	// $$B\n (new format): import directly, then feed the lexer a dummy statement
+	// $$\n  (textual format): not supported anymore
+	// $$B\n (binary format) : import directly, then feed the lexer a dummy statement
 
 	// look for $$
 	var c byte
@@ -829,28 +940,25 @@ func importfile(f *Val, indent []byte) {
 
 	switch c {
 	case '\n':
-		// old export format
-		parse_import(imp, indent)
+		yyerror("cannot import %s: old export format no longer supported (recompile library)", path_)
+		return nil
 
 	case 'B':
-		// new export format
 		if Debug_export != 0 {
 			fmt.Printf("importing %s (%s)\n", path_, file)
 		}
 		imp.ReadByte() // skip \n after $$B
-		Import(imp)
+		Import(importpkg, imp)
 
 	default:
-		Yyerror("no import in %q", path_)
+		yyerror("no import in %q", path_)
 		errorexit()
 	}
 
-	if safemode && !importpkg.Safe {
-		Yyerror("cannot import unsafe package %q", importpkg.Path)
-	}
+	return importpkg
 }
 
-func pkgnotused(lineno int32, path string, name string) {
+func pkgnotused(lineno src.XPos, path string, name string) {
 	// If the package was imported with a name other than the final
 	// import path element, show it explicitly in the error message.
 	// Note that this handles both renamed imports and imports of
@@ -871,61 +979,48 @@ func pkgnotused(lineno int32, path string, name string) {
 func mkpackage(pkgname string) {
 	if localpkg.Name == "" {
 		if pkgname == "_" {
-			Yyerror("invalid package name _")
+			yyerror("invalid package name _")
 		}
 		localpkg.Name = pkgname
 	} else {
 		if pkgname != localpkg.Name {
-			Yyerror("package %s; expected %s", pkgname, localpkg.Name)
-		}
-		for _, s := range localpkg.Syms {
-			if s.Def == nil {
-				continue
-			}
-			if s.Def.Op == OPACK {
-				// throw away top-level package name leftover
-				// from previous file.
-				// leave s->block set to cause redeclaration
-				// errors if a conflicting top-level name is
-				// introduced by a different file.
-				if !s.Def.Used && nsyntaxerrors == 0 {
-					pkgnotused(s.Def.Lineno, s.Def.Name.Pkg.Path, s.Name)
-				}
-				s.Def = nil
-				continue
-			}
-
-			if s.Def.Sym != s {
-				// throw away top-level name left over
-				// from previous import . "x"
-				if s.Def.Name != nil && s.Def.Name.Pack != nil && !s.Def.Name.Pack.Used && nsyntaxerrors == 0 {
-					pkgnotused(s.Def.Name.Pack.Lineno, s.Def.Name.Pack.Name.Pkg.Path, "")
-					s.Def.Name.Pack.Used = true
-				}
-
-				s.Def = nil
-				continue
-			}
+			yyerror("package %s; expected %s", pkgname, localpkg.Name)
 		}
 	}
+}
 
-	if outfile == "" {
-		p := infile
-		if i := strings.LastIndex(p, "/"); i >= 0 {
-			p = p[i+1:]
+func clearImports() {
+	for _, s := range localpkg.Syms {
+		if asNode(s.Def) == nil {
+			continue
 		}
-		if runtime.GOOS == "windows" {
-			if i := strings.LastIndex(p, `\`); i >= 0 {
-				p = p[i+1:]
+		if asNode(s.Def).Op == OPACK {
+			// throw away top-level package name leftover
+			// from previous file.
+			// leave s->block set to cause redeclaration
+			// errors if a conflicting top-level name is
+			// introduced by a different file.
+			if !asNode(s.Def).Used() && nsyntaxerrors == 0 {
+				pkgnotused(asNode(s.Def).Pos, asNode(s.Def).Name.Pkg.Path, s.Name)
 			}
+			s.Def = nil
+			continue
 		}
-		if i := strings.LastIndex(p, "."); i >= 0 {
-			p = p[:i]
+
+		if IsAlias(s) {
+			// throw away top-level name left over
+			// from previous import . "x"
+			if asNode(s.Def).Name != nil && asNode(s.Def).Name.Pack != nil && !asNode(s.Def).Name.Pack.Used() && nsyntaxerrors == 0 {
+				pkgnotused(asNode(s.Def).Name.Pack.Pos, asNode(s.Def).Name.Pack.Name.Pkg.Path, "")
+				asNode(s.Def).Name.Pack.SetUsed(true)
+			}
+
+			s.Def = nil
+			continue
 		}
-		suffix := ".o"
-		if writearchive {
-			suffix = ".a"
-		}
-		outfile = p + suffix
 	}
+}
+
+func IsAlias(sym *types.Sym) bool {
+	return sym.Def != nil && asNode(sym.Def).Sym != sym
 }

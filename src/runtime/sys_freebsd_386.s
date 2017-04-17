@@ -159,9 +159,9 @@ TEXT runtime·setitimer(SB), NOSPLIT, $-4
 	INT	$0x80
 	RET
 
-// func now() (sec int64, nsec int32)
-TEXT time·now(SB), NOSPLIT, $32
-	MOVL	$232, AX
+// func walltime() (sec int64, nsec int32)
+TEXT runtime·walltime(SB), NOSPLIT, $32
+	MOVL	$232, AX // clock_gettime
 	LEAL	12(SP), BX
 	MOVL	$0, 4(SP)	// CLOCK_REALTIME
 	MOVL	BX, 8(SP)
@@ -170,8 +170,8 @@ TEXT time·now(SB), NOSPLIT, $32
 	MOVL	16(SP), BX	// nsec
 
 	// sec is in AX, nsec in BX
-	MOVL	AX, sec+0(FP)
-	MOVL	$0, sec+4(FP)
+	MOVL	AX, sec_lo+0(FP)
+	MOVL	$0, sec_hi+4(FP)
 	MOVL	BX, nsec+8(FP)
 	RET
 
@@ -208,14 +208,20 @@ TEXT runtime·sigaction(SB),NOSPLIT,$-4
 	RET
 
 TEXT runtime·sigfwd(SB),NOSPLIT,$12-16
-	MOVL	sig+4(FP), AX
-	MOVL	AX, 0(SP)
-	MOVL	info+8(FP), AX
-	MOVL	AX, 4(SP)
-	MOVL	ctx+12(FP), AX
-	MOVL	AX, 8(SP)
 	MOVL	fn+0(FP), AX
+	MOVL	sig+4(FP), BX
+	MOVL	info+8(FP), CX
+	MOVL	ctx+12(FP), DX
+	MOVL	SP, SI
+	SUBL	$32, SP
+	ANDL	$~15, SP	// align stack: handler might be a C function
+	MOVL	BX, 0(SP)
+	MOVL	CX, 4(SP)
+	MOVL	DX, 8(SP)
+	MOVL	SI, 12(SP)	// save SI: handler might be a Go function
 	CALL	AX
+	MOVL	12(SP), AX
+	MOVL	AX, SP
 	RET
 
 TEXT runtime·sigtramp(SB),NOSPLIT,$12
@@ -390,6 +396,15 @@ TEXT runtime·closeonexec(SB),NOSPLIT,$32
 	INT	$0x80
 	JAE	2(PC)
 	NEGL	AX
+	RET
+
+// func cpuset_getaffinity(level int, which int, id int64, size int, mask *byte) int32
+TEXT runtime·cpuset_getaffinity(SB), NOSPLIT, $0-28
+	MOVL	$487, AX
+	INT	$0x80
+	JAE	2(PC)
+	NEGL	AX
+	MOVL	AX, ret+24(FP)
 	RET
 
 GLOBL runtime·tlsoffset(SB),NOPTR,$4

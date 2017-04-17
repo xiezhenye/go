@@ -7,6 +7,7 @@ package net
 import (
 	"context"
 	"internal/nettrace"
+	"internal/poll"
 	"time"
 )
 
@@ -59,6 +60,9 @@ type Dialer struct {
 	// that do not support keep-alives ignore this field.
 	KeepAlive time.Duration
 
+	// Resolver optionally specifies an alternate resolver to use.
+	Resolver *Resolver
+
 	// Cancel is an optional channel whose closure indicates that
 	// the dial should be canceled. Not all types of dials support
 	// cancelation.
@@ -92,6 +96,13 @@ func (d *Dialer) deadline(ctx context.Context, now time.Time) (earliest time.Tim
 	return minNonzeroTime(earliest, d.Deadline)
 }
 
+func (d *Dialer) resolver() *Resolver {
+	if d.Resolver != nil {
+		return d.Resolver
+	}
+	return DefaultResolver
+}
+
 // partialDeadline returns the deadline to use for a single address,
 // when multiple addresses are pending.
 func partialDeadline(now, deadline time.Time, addrsRemaining int) (time.Time, error) {
@@ -100,7 +111,7 @@ func partialDeadline(now, deadline time.Time, addrsRemaining int) (time.Time, er
 	}
 	timeRemaining := deadline.Sub(now)
 	if timeRemaining <= 0 {
-		return time.Time{}, errTimeout
+		return time.Time{}, poll.ErrTimeout
 	}
 	// Tentatively allocate equal time to each remaining address.
 	timeout := timeRemaining / time.Duration(addrsRemaining)
@@ -124,24 +135,27 @@ func (d *Dialer) fallbackDelay() time.Duration {
 	}
 }
 
-func parseNetwork(ctx context.Context, net string) (afnet string, proto int, err error) {
-	i := last(net, ':')
+func parseNetwork(ctx context.Context, network string, needsProto bool) (afnet string, proto int, err error) {
+	i := last(network, ':')
 	if i < 0 { // no colon
-		switch net {
+		switch network {
 		case "tcp", "tcp4", "tcp6":
 		case "udp", "udp4", "udp6":
 		case "ip", "ip4", "ip6":
+			if needsProto {
+				return "", 0, UnknownNetworkError(network)
+			}
 		case "unix", "unixgram", "unixpacket":
 		default:
-			return "", 0, UnknownNetworkError(net)
+			return "", 0, UnknownNetworkError(network)
 		}
-		return net, 0, nil
+		return network, 0, nil
 	}
-	afnet = net[:i]
+	afnet = network[:i]
 	switch afnet {
 	case "ip", "ip4", "ip6":
-		protostr := net[i+1:]
-		proto, i, ok := dtoi(protostr, 0)
+		protostr := network[i+1:]
+		proto, i, ok := dtoi(protostr)
 		if !ok || i != len(protostr) {
 			proto, err = lookupProtocol(ctx, protostr)
 			if err != nil {
@@ -150,14 +164,14 @@ func parseNetwork(ctx context.Context, net string) (afnet string, proto int, err
 		}
 		return afnet, proto, nil
 	}
-	return "", 0, UnknownNetworkError(net)
+	return "", 0, UnknownNetworkError(network)
 }
 
-// resolverAddrList resolves addr using hint and returns a list of
+// resolveAddrList resolves addr using hint and returns a list of
 // addresses. The result contains at least one address when error is
 // nil.
-func resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (addrList, error) {
-	afnet, _, err := parseNetwork(ctx, network)
+func (r *Resolver) resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (addrList, error) {
+	afnet, _, err := parseNetwork(ctx, network, true)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +180,6 @@ func resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (
 	}
 	switch afnet {
 	case "unix", "unixgram", "unixpacket":
-		// TODO(bradfitz): push down context
 		addr, err := ResolveUnixAddr(afnet, addr)
 		if err != nil {
 			return nil, err
@@ -176,7 +189,7 @@ func resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (
 		}
 		return addrList{addr}, nil
 	}
-	addrs, err := internetAddrList(ctx, afnet, addr)
+	addrs, err := r.internetAddrList(ctx, afnet, addr)
 	if err != nil || op != "dial" || hint == nil {
 		return addrs, err
 	}
@@ -221,7 +234,7 @@ func resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (
 		}
 	}
 	if len(naddrs) == 0 {
-		return nil, errNoSuitableAddress
+		return nil, &AddrError{Err: errNoSuitableAddress.Error(), Addr: hint.String()}
 	}
 	return naddrs, nil
 }
@@ -256,6 +269,9 @@ func resolveAddrList(ctx context.Context, op, network, addr string, hint Addr) (
 //	Dial("ip6:ipv6-icmp", "2001:db8::1")
 //
 // For Unix networks, the address must be a file system path.
+//
+// If the host is resolved to multiple addresses,
+// Dial will try each address in order until one succeeds.
 func Dial(network, address string) (Conn, error) {
 	var d Dialer
 	return d.Dial(network, address)
@@ -289,6 +305,14 @@ func (d *Dialer) Dial(network, address string) (Conn, error) {
 // the connection is complete, an error is returned. Once successfully
 // connected, any expiration of the context will not affect the
 // connection.
+//
+// When using TCP, and the host in the address parameter resolves to multiple
+// network addresses, any dial timeout (from d.Timeout or ctx) is spread
+// over each consecutive dial, such that each is given an appropriate
+// fraction of the time to connect.
+// For example, if a host has 4 IP addresses and the timeout is 1 minute,
+// the connect to each single address will be given 15 seconds to complete
+// before trying the next one.
 //
 // See func Dial for a description of the network and address
 // parameters.
@@ -326,7 +350,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 		resolveCtx = context.WithValue(resolveCtx, nettrace.TraceKey{}, &shadow)
 	}
 
-	addrs, err := resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
+	addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
 	}
@@ -524,8 +548,11 @@ func dialSingle(ctx context.Context, dp *dialParam, ra Addr) (c Conn, err error)
 // If host is omitted, as in ":8080", Listen listens on all available interfaces
 // instead of just the interface with the given host address.
 // See Dial for more details about address syntax.
+//
+// Listening on a hostname is not recommended because this creates a socket
+// for at most one of its IP addresses.
 func Listen(net, laddr string) (Listener, error) {
-	addrs, err := resolveAddrList(context.Background(), "listen", net, laddr, nil)
+	addrs, err := DefaultResolver.resolveAddrList(context.Background(), "listen", net, laddr, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: net, Source: nil, Addr: nil, Err: err}
 	}
@@ -551,8 +578,11 @@ func Listen(net, laddr string) (Listener, error) {
 // If host is omitted, as in ":8080", ListenPacket listens on all available interfaces
 // instead of just the interface with the given host address.
 // See Dial for the syntax of laddr.
+//
+// Listening on a hostname is not recommended because this creates a socket
+// for at most one of its IP addresses.
 func ListenPacket(net, laddr string) (PacketConn, error) {
-	addrs, err := resolveAddrList(context.Background(), "listen", net, laddr, nil)
+	addrs, err := DefaultResolver.resolveAddrList(context.Background(), "listen", net, laddr, nil)
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: net, Source: nil, Addr: nil, Err: err}
 	}
