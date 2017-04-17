@@ -585,6 +585,9 @@ func (p *Package) mangleName(n *Name) {
 	if *gccgo && n.IsVar() {
 		prefix = "C"
 	}
+	if n.Direct {
+		prefix+= "asm"
+	}
 	n.Mangle = prefix + n.Kind + "_" + n.Go
 }
 

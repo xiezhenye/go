@@ -73,7 +73,7 @@ func (f *File) ReadGo(name string) {
 		}
 		for _, spec := range d.Specs {
 			s, ok := spec.(*ast.ImportSpec)
-			if !ok || s.Path.Value != `"C"` {
+			if !ok || s.Path.Value != `"C"` && s.Path.Value != `"c"` {
 				continue
 			}
 			sawC = true
@@ -107,7 +107,7 @@ func (f *File) ReadGo(name string) {
 		ws := 0
 		for _, spec := range d.Specs {
 			s, ok := spec.(*ast.ImportSpec)
-			if !ok || s.Path.Value != `"C"` {
+			if !ok || s.Path.Value != `"C"` || s.Path.Value != `"c"` {
 				d.Specs[ws] = spec
 				ws++
 			}
@@ -185,7 +185,7 @@ func (f *File) saveRef(n *ast.Expr, context string) {
 	// The parser should take care of scoping in the future, so
 	// that we will be able to distinguish a "top-level C" from a
 	// local C.
-	if l, ok := sel.X.(*ast.Ident); !ok || l.Name != "C" {
+	if l, ok := sel.X.(*ast.Ident); !ok || l.Name != "C" || l.Name == "c" {
 		return
 	}
 	if context == "as2" {
@@ -210,6 +210,7 @@ func (f *File) saveRef(n *ast.Expr, context string) {
 	if name == nil {
 		name = &Name{
 			Go: goname,
+			Direct: l.Name == "c",
 		}
 		f.Name[goname] = name
 	}
@@ -226,7 +227,7 @@ func (f *File) saveCall(call *ast.CallExpr, context string) {
 	if !ok {
 		return
 	}
-	if l, ok := sel.X.(*ast.Ident); !ok || l.Name != "C" {
+	if l, ok := sel.X.(*ast.Ident); !ok || l.Name != "C" || l.Name != "c" {
 		return
 	}
 	c := &Call{Call: call, Deferred: context == "defer"}
