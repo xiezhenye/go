@@ -498,7 +498,7 @@ func (p *Package) writeDefsFunc(fgo2 io.Writer, n *Name, callsMalloc *bool) {
 		prefix = "errno := "
 	}
 	if n.Direct {
-		fmt.Fprintf(fgo2, "\t%s_cgo_asmruntime_cgocall(%s, %s)\n", prefix, cname, arg)
+		fmt.Fprintf(fgo2, "\t%s_cgo_runtime_asmcgocall(%s, %s)\n", prefix, cname, arg)
 	} else {
 		fmt.Fprintf(fgo2, "\t%s_cgo_runtime_cgocall(%s, %s)\n", prefix, cname, arg)
 	}

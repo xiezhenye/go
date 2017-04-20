@@ -598,11 +598,16 @@ func (p *Package) rewriteCalls(f *File) bool {
 	needsUnsafe := false
 	for _, call := range f.Calls {
 		// This is a call to C.xxx; set goname to "xxx".
-		goname := call.Call.Fun.(*ast.SelectorExpr).Sel.Name
+		sel := call.Call.Fun.(*ast.SelectorExpr)
+		goname := sel.Sel.Name
 		if goname == "malloc" {
 			continue
 		}
-		name := f.Name[goname]
+		key := sel.X.(*ast.Ident).Name + "." + goname
+		name := f.Name[key]
+		if name == nil {
+			continue
+		}
 		if name.Kind != "func" {
 			// Probably a type conversion.
 			continue
@@ -613,6 +618,7 @@ func (p *Package) rewriteCalls(f *File) bool {
 	}
 	return needsUnsafe
 }
+
 
 // rewriteCall rewrites one call to add pointer checks.
 // If any pointer checks are required, we rewrite the call into a
